@@ -637,13 +637,14 @@
       document.getElementById('pin-modal').classList.add('hidden');
     }
 
-    // Read Dropbox config from URL hash (#miv=...) so page refreshes & APK links never lose credentials
+    // Read Dropbox config from URL hash (#miv=...) or query (?miv=...) so new devices never inherit an expired token
     function extractConfigFromUrlHash() {
       try {
-        const hash = window.location.hash || '';
-        const match = hash.match(/miv=([A-Za-z0-9\-_]+)/);
+        const source = (window.location.hash || '') + '&' + (window.location.search || '');
+        const match = source.match(/miv=([A-Za-z0-9\-_]+)/);
         if (!match) return null;
-        const b64 = match[1].replace(/-/g, '+').replace(/_/g, '/');
+        let b64 = match[1].replace(/-/g, '+').replace(/_/g, '/');
+        while (b64.length % 4) b64 += '=';
         const jsonStr = decodeURIComponent(escape(atob(b64)));
         return JSON.parse(jsonStr);
       } catch (e) {
@@ -651,18 +652,24 @@
       }
     }
 
+    function buildSyncPayloadBase64(dbx) {
+      const hasPermanentRefresh = !!(dbx.refreshToken && dbx.appKey);
+      const payload = JSON.stringify({
+        // Omit short-lived accessToken when permanent refreshToken + appKey exist so new devices always mint a fresh token
+        t: hasPermanentRefresh ? '' : (dbx.accessToken || ''),
+        rt: dbx.refreshToken || '',
+        ak: dbx.appKey || '',
+        as: dbx.appSecret || '',
+        p: dbx.folderPath || '/MIV_Farm_Records/miv_farm_database.json'
+      });
+      return btoa(unescape(encodeURIComponent(payload)))
+        .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    }
+
     function syncConfigToUrlHash(dbx) {
       try {
         if (!dbx || (!dbx.accessToken && !dbx.refreshToken)) return;
-        const payload = JSON.stringify({
-          t: dbx.accessToken || '',
-          rt: dbx.refreshToken || '',
-          ak: dbx.appKey || '',
-          as: dbx.appSecret || '',
-          p: dbx.folderPath || '/MIV_Farm_Records/miv_farm_database.json'
-        });
-        const b64 = btoa(unescape(encodeURIComponent(payload)))
-          .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+        const b64 = buildSyncPayloadBase64(dbx);
         window.history.replaceState(null, '', '#miv=' + b64);
       } catch (e) {
         // Ignore if sandboxed history restricts replaceState
@@ -800,16 +807,18 @@
       }
 
       if (hashCfg) {
-        if (hashCfg.t) base.dropbox.accessToken = hashCfg.t;
         if (hashCfg.rt) base.dropbox.refreshToken = hashCfg.rt;
         if (hashCfg.ak) base.dropbox.appKey = hashCfg.ak;
         if (hashCfg.as) base.dropbox.appSecret = hashCfg.as;
+        // When opened via 1-Tap Sync Link with a Permanent Refresh Token, force immediate fresh token minting
+        if (hashCfg.rt && hashCfg.ak) {
+          base.dropbox.accessToken = '';
+          base.dropbox.tokenExpiresAt = 0;
+        } else if (hashCfg.t) {
+          base.dropbox.accessToken = hashCfg.t;
+        }
         if (hashCfg.p) base.dropbox.folderPath = hashCfg.p;
         base.dropbox.autoSync = true;
-      }
-
-      if (base.dropbox && (base.dropbox.accessToken || base.dropbox.refreshToken)) {
-        syncConfigToUrlHash(base.dropbox);
       }
 
       return base;
@@ -1055,10 +1064,10 @@
       throw lastErr || new Error('Network request failed');
     }
 
-    async function ensureValidDropboxAccessToken() {
+    async function ensureValidDropboxAccessToken(forceRefresh = false) {
       const dbx = appState.dropbox || {};
       const now = Date.now();
-      if (dbx.accessToken && (!dbx.refreshToken || (dbx.tokenExpiresAt && now < dbx.tokenExpiresAt - 60000))) {
+      if (!forceRefresh && dbx.accessToken && (!dbx.refreshToken || (dbx.tokenExpiresAt && now < dbx.tokenExpiresAt - 60000))) {
         return dbx.accessToken;
       }
       if (!dbx.refreshToken || !dbx.appKey) {
@@ -1067,9 +1076,11 @@
       try {
         const params = new URLSearchParams();
         params.append('grant_type', 'refresh_token');
-        params.append('refresh_token', dbx.refreshToken);
-        params.append('client_id', dbx.appKey);
-        if (dbx.appSecret) params.append('client_secret', dbx.appSecret);
+        params.append('refresh_token', dbx.refreshToken.trim());
+        params.append('client_id', dbx.appKey.trim());
+        if (dbx.appSecret && dbx.appSecret.trim()) {
+          params.append('client_secret', dbx.appSecret.trim());
+        }
 
         const res = await fetchWithRetry('https://api.dropboxapi.com/oauth2/token', {
           method: 'POST',
@@ -1080,12 +1091,13 @@
         if (!res.ok) {
           uiState.dropboxError = formatDropboxApiError(res.status, text);
           renderDropboxErrorBox();
-          return dbx.accessToken || '';
+          return forceRefresh ? '' : (dbx.accessToken || '');
         }
         const data = JSON.parse(text);
         if (data.access_token) {
           appState.dropbox.accessToken = data.access_token;
           appState.dropbox.tokenExpiresAt = Date.now() + ((data.expires_in || 14400) * 1000);
+          uiState.dropboxError = null;
           localStorage.setItem(STORAGE_KEY, JSON.stringify(appState));
           mirrorStateToIndexedDB(appState);
           syncConfigToUrlHash(appState.dropbox);
@@ -1094,7 +1106,7 @@
       } catch (e) {
         console.warn('Refresh token exchange failed:', e);
       }
-      return dbx.accessToken || '';
+      return forceRefresh ? '' : (dbx.accessToken || '');
     }
 
     function generatePkceVerifier() {
@@ -1259,16 +1271,25 @@
     }
 
     async function testDropboxConnection() {
-      const token = await ensureValidDropboxAccessToken();
+      let token = await ensureValidDropboxAccessToken(!!(appState.dropbox.refreshToken && appState.dropbox.appKey));
       if (!token) {
         showSnackbar('Enter a token or Refresh Token first', 'error');
         return;
       }
       try {
-        const res = await fetchWithRetry('https://api.dropboxapi.com/2/users/get_current_account', {
+        let res = await fetchWithRetry('https://api.dropboxapi.com/2/users/get_current_account', {
           method: 'POST',
           headers: { 'Authorization': 'Bearer ' + token }
         });
+        if (res.status === 401 && appState.dropbox.refreshToken && appState.dropbox.appKey) {
+          token = await ensureValidDropboxAccessToken(true);
+          if (token) {
+            res = await fetchWithRetry('https://api.dropboxapi.com/2/users/get_current_account', {
+              method: 'POST',
+              headers: { 'Authorization': 'Bearer ' + token }
+            });
+          }
+        }
         const text = await res.text();
         if (!res.ok) {
           uiState.dropboxError = formatDropboxApiError(res.status, text);
@@ -1326,7 +1347,7 @@
 
     async function syncToDropbox(silent = false) {
       if (uiState.dropboxSyncing) return;
-      const token = await ensureValidDropboxAccessToken();
+      let token = await ensureValidDropboxAccessToken();
       if (!token) {
         if (!silent) showSnackbar('Please enter a Dropbox Access Token first', 'error');
         return;
@@ -1347,27 +1368,35 @@
         records: appState.records
       }, null, 2);
 
+      const performUpload = (authToken) => fetchWithRetry('https://content.dropboxapi.com/2/files/upload', {
+        method: 'POST',
+        headers: {
+          'Authorization': 'Bearer ' + authToken,
+          'Dropbox-API-Arg': JSON.stringify({
+            path: filePath,
+            mode: 'overwrite',
+            autorename: false,
+            mute: true
+          }),
+          'Content-Type': 'application/octet-stream'
+        },
+        body: payload
+      });
+
       try {
-        const response = await fetchWithRetry('https://content.dropboxapi.com/2/files/upload', {
-          method: 'POST',
-          headers: {
-            'Authorization': 'Bearer ' + token,
-            'Dropbox-API-Arg': JSON.stringify({
-              path: filePath,
-              mode: 'overwrite',
-              autorename: false,
-              mute: true
-            }),
-            'Content-Type': 'application/octet-stream'
-          },
-          body: payload
-        });
+        let response = await performUpload(token);
+
+        // If 401 occurs and a Refresh Token exists, mint a fresh access token and retry immediately
+        if (response.status === 401 && appState.dropbox.refreshToken && appState.dropbox.appKey) {
+          appState.dropbox.tokenExpiresAt = 0;
+          const freshToken = await ensureValidDropboxAccessToken(true);
+          if (freshToken) {
+            response = await performUpload(freshToken);
+          }
+        }
 
         const errText = await response.text();
         if (!response.ok) {
-          if (response.status === 401 && appState.dropbox.refreshToken) {
-            appState.dropbox.tokenExpiresAt = 0;
-          }
           uiState.dropboxError = formatDropboxApiError(response.status, errText);
           renderDropboxErrorBox();
           throw new Error(uiState.dropboxError.message);
@@ -1398,7 +1427,7 @@
     }
 
     async function pullFromDropbox(silent = false) {
-      const token = await ensureValidDropboxAccessToken();
+      let token = await ensureValidDropboxAccessToken();
       if (!token) {
         if (!silent) showSnackbar('Enter Dropbox Access Token first', 'error');
         return;
@@ -1408,15 +1437,25 @@
       updateDropboxStatusPill();
 
       const filePath = resolveDropboxDatabaseFilePath();
+      const performDownload = (authToken) => fetchWithRetry('https://content.dropboxapi.com/2/files/download', {
+        method: 'POST',
+        headers: {
+          'Authorization': 'Bearer ' + authToken,
+          'Dropbox-API-Arg': JSON.stringify({ path: filePath })
+        }
+      });
 
       try {
-        const response = await fetchWithRetry('https://content.dropboxapi.com/2/files/download', {
-          method: 'POST',
-          headers: {
-            'Authorization': 'Bearer ' + token,
-            'Dropbox-API-Arg': JSON.stringify({ path: filePath })
+        let response = await performDownload(token);
+
+        // Automatically mint a fresh token via Refresh Token and retry if 401 occurs on new device
+        if (response.status === 401 && appState.dropbox.refreshToken && appState.dropbox.appKey) {
+          appState.dropbox.tokenExpiresAt = 0;
+          const freshToken = await ensureValidDropboxAccessToken(true);
+          if (freshToken) {
+            response = await performDownload(freshToken);
           }
-        });
+        }
 
         if (!response.ok) {
           const errText = await response.text();
@@ -1426,9 +1465,6 @@
             uiState.dropboxError = null;
             await syncToDropbox(silent);
             return;
-          }
-          if (response.status === 401 && appState.dropbox.refreshToken) {
-            appState.dropbox.tokenExpiresAt = 0;
           }
           uiState.dropboxError = formatDropboxApiError(response.status, errText);
           renderDropboxErrorBox();
@@ -1544,6 +1580,10 @@
         showSnackbar('Paste a Refresh Token or Access Token first', 'error');
         return;
       }
+      if (refreshToken && !appKey) {
+        showSnackbar('Enter App Key alongside Refresh Token so new devices auto-renew', 'error');
+        return;
+      }
       appState.dropbox.refreshToken = refreshToken;
       appState.dropbox.appKey = appKey;
       appState.dropbox.appSecret = appSecret;
@@ -1551,7 +1591,8 @@
       appState.dropbox.folderPath = path;
       saveState(false);
 
-      const fullUrl = window.location.href;
+      const baseUrl = window.location.href.split('#')[0];
+      const fullUrl = `${baseUrl}#miv=${buildSyncPayloadBase64(appState.dropbox)}`;
       const tempInput = document.createElement('input');
       tempInput.value = fullUrl;
       document.body.appendChild(tempInput);
