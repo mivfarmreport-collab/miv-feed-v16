@@ -523,10 +523,10 @@
         logsPassword: '1234'
       },
       groups: [
-        { id: 'grp-a', name: 'FARM A', code: 'KP', badgeColor: 'emerald' },
-        { id: 'grp-b', name: 'FARM B', code: 'KP', badgeColor: 'amber' },
-        { id: 'grp-c', name: 'FARM C', code: 'DANGI', badgeColor: 'blue' },
-        { id: 'grp-d', name: 'FARM D', code: 'GADDES', badgeColor: 'purple' }
+        { id: 'grp-a', name: 'FARM A', code: 'KP', badgeColor: 'emerald', cycleName: 'Cycle 76', cycleStartDate: new Date().toISOString().split('T')[0], cycleDurationDays: 60 },
+        { id: 'grp-b', name: 'FARM B', code: 'KP', badgeColor: 'amber', cycleName: 'Cycle 76', cycleStartDate: new Date().toISOString().split('T')[0], cycleDurationDays: 60 },
+        { id: 'grp-c', name: 'FARM C', code: 'DANGI', badgeColor: 'blue', cycleName: 'Cycle 76', cycleStartDate: new Date().toISOString().split('T')[0], cycleDurationDays: 60 },
+        { id: 'grp-d', name: 'FARM D', code: 'GADDES', badgeColor: 'purple', cycleName: 'Cycle 76', cycleStartDate: new Date().toISOString().split('T')[0], cycleDurationDays: 60 }
       ],
       houses: [
         { id: 'h-a-store', name: 'STORE', groupId: 'grp-a', isStore: true },
@@ -690,13 +690,23 @@
           const tx = db.transaction('kv', 'readwrite');
           tx.objectStore('kv').put(JSON.stringify(stateObj), STORAGE_KEY);
         };
-      } catch (e) {}
+      } catch (e) {
+        // Ignore IDB restrictions
+      }
     }
 
-    // Ensure every group has 1 STORE house and standardized shift roles
-    function ensureGroupStoresAndWorkers(groupsList, housesList, existingWorkersList) {
+    // Ensure every group has 1 STORE house, individual cycle settings, and standardized shift roles
+    function ensureGroupStoresAndWorkers(groupsList, housesList, existingWorkersList, fallbackCycle = null) {
+      const baseCycle = fallbackCycle || DEFAULT_STATE.cycle;
+      const normalizedGroups = (groupsList || []).map(g => ({
+        ...g,
+        cycleName: g.cycleName || baseCycle.name || 'Cycle 76',
+        cycleStartDate: g.cycleStartDate || baseCycle.startDate || new Date().toISOString().split('T')[0],
+        cycleDurationDays: parseInt(g.cycleDurationDays, 10) || parseInt(baseCycle.durationDays, 10) || 60
+      }));
+
       const updatedHouses = Array.isArray(housesList) ? [...housesList] : [];
-      (groupsList || []).forEach(g => {
+      normalizedGroups.forEach(g => {
         const hasStore = updatedHouses.some(h => h.groupId === g.id && (h.isStore || String(h.name).trim().toUpperCase() === 'STORE'));
         if (!hasStore) {
           updatedHouses.unshift({
@@ -721,7 +731,7 @@
         });
       });
 
-      return { houses: updatedHouses, workers: standardizedWorkers };
+      return { groups: normalizedGroups, houses: updatedHouses, workers: standardizedWorkers };
     }
 
     // Merge local and cloud states without losing offline records or Dropbox settings
@@ -741,10 +751,11 @@
       });
       const mergedRecords = Array.from(mergedMap.values()).sort((a, b) => new Date(b.datetime) - new Date(a.datetime));
 
-      const mergedGroups = Array.isArray(cloudSt.groups) && cloudSt.groups.length ? cloudSt.groups : localSt.groups;
+      const rawGroups = Array.isArray(cloudSt.groups) && cloudSt.groups.length ? cloudSt.groups : localSt.groups;
       const rawHouses = Array.isArray(cloudSt.houses) && cloudSt.houses.length ? cloudSt.houses : localSt.houses;
       const existingWorkers = Array.isArray(cloudSt.workers) ? cloudSt.workers : localSt.workers;
-      const { houses: mergedHouses, workers: standardizedWorkers } = ensureGroupStoresAndWorkers(mergedGroups, rawHouses, existingWorkers);
+      const mergedCycle = cloudSt.cycle ? { ...localSt.cycle, ...cloudSt.cycle } : localSt.cycle;
+      const { groups: mergedGroups, houses: mergedHouses, workers: standardizedWorkers } = ensureGroupStoresAndWorkers(rawGroups, rawHouses, existingWorkers, mergedCycle);
 
       const sampleIds = new Set(['rec-101', 'rec-102', 'rec-103', 'rec-104', 'rec-105', 'rec-106', 'rec-107', 'rec-108']);
       const cleanedRecords = mergedRecords.filter(r => !sampleIds.has(r.id));
@@ -753,7 +764,7 @@
 
       return {
         ...localSt,
-        cycle: cloudSt.cycle ? { ...localSt.cycle, ...cloudSt.cycle } : localSt.cycle,
+        cycle: mergedCycle,
         security: cloudSt.security ? { ...localSt.security, ...cloudSt.security } : localSt.security,
         groups: mergedGroups,
         houses: mergedHouses,
@@ -778,10 +789,11 @@
 
       const base = JSON.parse(JSON.stringify(DEFAULT_STATE));
       if (parsed) {
-        const mergedGroups = Array.isArray(parsed.groups) && parsed.groups.length ? parsed.groups : base.groups;
+        const effectiveCycle = { ...base.cycle, ...(parsed.cycle || {}) };
+        const rawGroups = Array.isArray(parsed.groups) && parsed.groups.length ? parsed.groups : base.groups;
         const rawHouses = Array.isArray(parsed.houses) && parsed.houses.length ? parsed.houses : base.houses;
         const existingWorkers = Array.isArray(parsed.workers) ? parsed.workers : [];
-        const { houses: mergedHouses, workers: standardizedWorkers } = ensureGroupStoresAndWorkers(mergedGroups, rawHouses, existingWorkers);
+        const { groups: mergedGroups, houses: mergedHouses, workers: standardizedWorkers } = ensureGroupStoresAndWorkers(rawGroups, rawHouses, existingWorkers, effectiveCycle);
 
         const sampleIds = new Set(['rec-101', 'rec-102', 'rec-103', 'rec-104', 'rec-105', 'rec-106', 'rec-107', 'rec-108']);
         const cleanedRecords = (Array.isArray(parsed.records) ? parsed.records : []).filter(r => !sampleIds.has(r.id));
@@ -791,7 +803,7 @@
         Object.assign(base, {
           ...parsed,
           security: { ...base.security, ...(parsed.security || {}) },
-          cycle: { ...base.cycle, ...(parsed.cycle || {}) },
+          cycle: effectiveCycle,
           dropbox: { ...base.dropbox, ...(parsed.dropbox || {}) },
           groups: mergedGroups,
           houses: mergedHouses,
@@ -801,7 +813,8 @@
           notifications: cleanedNotifications
         });
       } else {
-        const initialized = ensureGroupStoresAndWorkers(base.groups, base.houses, []);
+        const initialized = ensureGroupStoresAndWorkers(base.groups, base.houses, [], base.cycle);
+        base.groups = initialized.groups;
         base.houses = initialized.houses;
         base.workers = initialized.workers;
       }
@@ -916,38 +929,57 @@
     }
 
     function formatDisplayDateTime(isoStr) {
-      if (!isoStr) return '-';
+      if (!isoStr) return '';
       const d = new Date(isoStr);
       if (isNaN(d.getTime())) return isoStr;
       return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }) + ' • ' +
-             d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+             d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
     }
 
     function formatShortDate(isoStr) {
-      if (!isoStr) return '-';
+      if (!isoStr) return '';
       const d = new Date(isoStr);
       if (isNaN(d.getTime())) return isoStr;
       return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
     }
 
-    function getCycleDayInfo() {
-      const start = new Date(appState.cycle.startDate + 'T00:00:00');
-      const now = new Date();
-      const diffMs = now - start;
-      const dayNum = Math.max(1, Math.min(appState.cycle.durationDays, Math.floor(diffMs / 86400000) + 1));
-      const pct = Math.min(100, Math.round((dayNum / appState.cycle.durationDays) * 100));
-      return { dayNum, totalDays: appState.cycle.durationDays, pct };
+    function getGroupCycleConfig(groupId = null) {
+      const grp = groupId ? appState.groups.find(g => g.id === groupId) : null;
+      return {
+        name: (grp && grp.cycleName) ? grp.cycleName : (appState.cycle.name || 'Cycle 76'),
+        startDate: (grp && grp.cycleStartDate) ? grp.cycleStartDate : (appState.cycle.startDate || new Date().toISOString().split('T')[0]),
+        durationDays: (grp && grp.cycleDurationDays) ? (parseInt(grp.cycleDurationDays, 10) || 60) : (parseInt(appState.cycle.durationDays, 10) || 60)
+      };
     }
 
-    function getCycleWindowDates() {
-      const start = new Date(appState.cycle.startDate + 'T00:00:00');
-      const end = new Date(start.getTime() + appState.cycle.durationDays * 86400000);
+    function getCycleDayInfo(groupId = null) {
+      const cfg = getGroupCycleConfig(groupId);
+      const start = new Date(cfg.startDate + 'T00:00:00');
+      const now = new Date();
+      const diffMs = now - start;
+      const dayNum = Math.max(1, Math.min(cfg.durationDays, Math.floor(diffMs / 86400000) + 1));
+      const pct = Math.min(100, Math.round((dayNum / cfg.durationDays) * 100));
+      return { dayNum, totalDays: cfg.durationDays, pct, name: cfg.name, startDate: cfg.startDate };
+    }
+
+    function getCycleWindowDates(groupId = null) {
+      const cfg = getGroupCycleConfig(groupId);
+      const start = new Date(cfg.startDate + 'T00:00:00');
+      const end = new Date(start.getTime() + cfg.durationDays * 86400000);
       return { start, end };
     }
 
-    function getCycleRecords() {
-      const { start, end } = getCycleWindowDates();
+    function getCycleRecords(groupId = null) {
+      if (groupId) {
+        const { start, end } = getCycleWindowDates(groupId);
+        return appState.records.filter(r => {
+          if (r.groupId !== groupId) return false;
+          const d = new Date(r.datetime);
+          return d >= start && d <= end;
+        });
+      }
       return appState.records.filter(r => {
+        const { start, end } = getCycleWindowDates(r.groupId);
         const d = new Date(r.datetime);
         return d >= start && d <= end;
       });
@@ -1831,7 +1863,7 @@
       }
 
       const isDelivery = uiState.selectedEntryType === 'input';
-      const cycleInfo = getCycleDayInfo();
+      const cycleInfo = getCycleDayInfo(activeGroup?.id);
       const todayIsoDate = new Date().toISOString().slice(0, 10);
 
       return `
@@ -1855,7 +1887,7 @@
               <div>
                 <div class="flex items-center justify-between mb-2">
                   <label class="block text-xs font-extrabold text-earth-900">1. Select Farm Group *</label>
-                  <span class="text-xs font-extrabold text-farm-700">${escapeHtml(appState.cycle.name)}</span>
+                  <span class="text-xs font-extrabold text-farm-700">${escapeHtml(cycleInfo.name)}</span>
                 </div>
                 <div class="grid grid-cols-2 gap-2.5">
                   ${appState.groups.map(g => {
@@ -2068,13 +2100,25 @@
     }
 
     function renderWorkerSummaryView() {
-      const cycleInfo = getCycleDayInfo();
-      const { start: cycleStart, end: cycleEnd } = getCycleWindowDates();
       const filterId = uiState.summaryGroupFilter || 'all';
       const isAll = filterId === 'all';
       const activeGroup = isAll ? null : (appState.groups.find(g => g.id === filterId) || appState.groups[0]);
+      const targetGroupId = isAll ? null : activeGroup.id;
 
-      const cycleRecs = getCycleRecords();
+      const cycleInfo = getCycleDayInfo(targetGroupId);
+      const { start: cycleStart, end: cycleEnd } = getCycleWindowDates(targetGroupId);
+
+      // Compute cycle window bounds across all groups when 'All 4 Groups' is selected
+      let displayStart = cycleStart;
+      let displayEnd = cycleEnd;
+      if (isAll && appState.groups.length > 0) {
+        const starts = appState.groups.map(g => getCycleWindowDates(g.id).start.getTime());
+        const ends = appState.groups.map(g => getCycleWindowDates(g.id).end.getTime());
+        displayStart = new Date(Math.min(...starts));
+        displayEnd = new Date(Math.max(...ends));
+      }
+
+      const cycleRecs = getCycleRecords(targetGroupId);
       let hopperConsumed = 0;
       let totalDelivered = 0;
       cycleRecs.forEach(r => {
@@ -2112,26 +2156,40 @@
                 <span class="text-[10px] font-extrabold uppercase tracking-wider text-harvest-400">
                   ${isAll ? 'ALL 4 GROUPS' : escapeHtml(activeGroup.name)} &bull; CYCLE SUMMARY
                 </span>
-                <h2 class="text-xl font-extrabold mt-0.5">${escapeHtml(appState.cycle.name)}</h2>
+                <h2 class="text-xl font-extrabold mt-0.5">${isAll ? 'Individual Group Cycles' : escapeHtml(cycleInfo.name)}</h2>
                 <p class="text-xs font-medium text-emerald-300 mt-1">
-                  ${formatShortDate(cycleStart.toISOString())} &rarr; ${formatShortDate(cycleEnd.toISOString())}
+                  ${formatShortDate(displayStart.toISOString())} &rarr; ${formatShortDate(displayEnd.toISOString())}
                 </p>
               </div>
               <div class="px-3 py-2 rounded-2xl bg-white/10 border border-white/15 text-center shrink-0">
-                <span class="text-sm font-extrabold text-harvest-400 block">Day ${cycleInfo.dayNum}</span>
-                <span class="text-[10px] text-farm-200 block">of ${cycleInfo.totalDays} Days</span>
+                <span class="text-sm font-extrabold text-harvest-400 block">${isAll ? `${appState.groups.length} Groups` : `Day ${cycleInfo.dayNum}`}</span>
+                <span class="text-[10px] text-farm-200 block">${isAll ? 'Active Cycles' : `of ${cycleInfo.totalDays} Days`}</span>
               </div>
             </div>
 
-            <div class="w-full h-2 bg-farm-950 rounded-full overflow-hidden mt-3.5">
-              <div class="h-full bg-gradient-to-r from-harvest-400 to-emerald-400 rounded-full" style="width: ${cycleInfo.pct}%"></div>
-            </div>
+            ${isAll ? `
+              <div class="grid grid-cols-2 gap-1.5 mt-3">
+                ${appState.groups.map(g => {
+                  const gci = getCycleDayInfo(g.id);
+                  return `
+                    <div onclick="uiState.summaryGroupFilter='${g.id}'; renderApp()" class="cursor-pointer bg-white/10 hover:bg-white/15 border border-white/10 rounded-xl px-2.5 py-1.5 flex items-center justify-between text-[11px] transition">
+                      <span class="font-bold text-white truncate">${escapeHtml(g.name)} (${escapeHtml(gci.name)})</span>
+                      <span class="font-extrabold text-harvest-400 shrink-0 ml-1">D${gci.dayNum}/${gci.totalDays}</span>
+                    </div>
+                  `;
+                }).join('')}
+              </div>
+            ` : `
+              <div class="w-full h-2 bg-farm-950 rounded-full overflow-hidden mt-3.5">
+                <div class="h-full bg-gradient-to-r from-harvest-400 to-emerald-400 rounded-full" style="width: ${cycleInfo.pct}%"></div>
+              </div>
+            `}
 
             <div class="grid grid-cols-3 gap-2 mt-4">
               <div class="bg-white/10 border border-white/10 rounded-2xl p-2.5">
                 <span class="text-[10px] font-semibold text-farm-200 block">Hopper Consumed</span>
                 <span class="text-lg font-extrabold text-white mt-0.5 block">${hopperConsumed}</span>
-                <span class="text-[10px] font-bold text-harvest-400">Bags (60d)</span>
+                <span class="text-[10px] font-bold text-harvest-400">Bags (${cycleInfo.totalDays}d)</span>
               </div>
               <div class="bg-white/10 border border-white/10 rounded-2xl p-2.5">
                 <span class="text-[10px] font-semibold text-farm-200 block">Total Delivered</span>
@@ -2150,16 +2208,17 @@
           <div class="space-y-3">
             <div class="flex items-center justify-between px-1">
               <h3 class="text-xs font-extrabold uppercase tracking-wider text-earth-700">
-                ${isAll ? 'ALL FARM HOUSES' : `${escapeHtml(activeGroup.name)} HOUSES`} (60-DAY CYCLE)
+                ${isAll ? 'ALL FARM HOUSES' : `${escapeHtml(activeGroup.name)} HOUSES`} (${cycleInfo.totalDays}-DAY CYCLE)
               </h3>
               <span class="text-xs font-bold text-farm-700">${housesToShow.length} Houses</span>
             </div>
 
             ${housesToShow.map(h => {
               const grp = appState.groups.find(g => g.id === h.groupId);
+              const gCycleInfo = getCycleDayInfo(h.groupId);
               const hm = calculateHouseMetrics(h.id, cycleRecs);
               const isStore = hm.isStore;
-              const avgPerDay = (hm.outputBags / Math.max(1, cycleInfo.dayNum)).toFixed(1);
+              const avgPerDay = (hm.outputBags / Math.max(1, gCycleInfo.dayNum)).toFixed(1);
               return `
                 <div class="bg-white rounded-3xl p-4 shadow-soft border border-earth-200/70 space-y-2.5">
                   <div class="flex items-center justify-between gap-2">
@@ -2554,6 +2613,7 @@
 
             ${appState.groups.map(g => {
               const gm = calculateGroupMetrics(g.id, cycleRecs);
+              const gCycle = getCycleDayInfo(g.id);
               const groupHouses = appState.houses.filter(h => h.groupId === g.id);
 
               return `
@@ -2565,7 +2625,7 @@
                       </div>
                       <div>
                         <h4 class="text-sm font-extrabold text-earth-900">${escapeHtml(g.name)}</h4>
-                        <p class="text-[11px] text-earth-500">${groupHouses.length} Houses &bull; ${gm.recordCount} logs</p>
+                        <p class="text-[11px] text-earth-500">${escapeHtml(gCycle.name)} (Day ${gCycle.dayNum}/${gCycle.totalDays}) &bull; ${groupHouses.length} Houses</p>
                       </div>
                     </div>
                     <div class="text-right">
@@ -2633,7 +2693,6 @@
     function getFilteredReportRecords() {
       const now = new Date();
       const todayStr = now.toISOString().slice(0, 10);
-      const { start: cycleStart, end: cycleEnd } = getCycleWindowDates();
 
       return appState.records.filter(r => {
         const recDate = new Date(r.datetime);
@@ -2643,6 +2702,7 @@
           const weekAgo = new Date(now.getTime() - 7 * 86400000);
           if (recDate < weekAgo) return false;
         } else if (uiState.reportPeriod === 'cycle') {
+          const { start: cycleStart, end: cycleEnd } = getCycleWindowDates(r.groupId);
           if (recDate < cycleStart || recDate > cycleEnd) return false;
         }
 
@@ -2985,24 +3045,42 @@
     function renderSetupCycle() {
       return `
         <div class="space-y-3">
-          <form onsubmit="saveCycleSettings(event)" class="bg-white rounded-3xl p-4 shadow-soft border border-earth-200/70 space-y-3">
-            <h3 class="text-xs font-extrabold uppercase tracking-wider text-earth-500">60-Day Cycle Configuration</h3>
-            <div>
-              <label class="block text-xs font-bold text-earth-800 mb-1">Batch / Cycle Name</label>
-              <input id="cycle-name-input" type="text" value="${escapeHtml(appState.cycle.name)}" required class="w-full px-3 py-2.5 rounded-xl bg-earth-50 border border-earth-200 text-xs font-bold" />
+          <div class="bg-white rounded-3xl p-4 shadow-soft border border-earth-200/70 space-y-3">
+            <div class="flex items-center justify-between">
+              <h3 class="text-xs font-extrabold uppercase tracking-wider text-earth-500">Individual Group Cycle Settings</h3>
+              <span class="text-[10px] font-bold text-farm-700 bg-farm-50 px-2 py-0.5 rounded-md border border-farm-200">Per-Group</span>
             </div>
-            <div class="grid grid-cols-2 gap-2.5">
-              <div>
-                <label class="block text-xs font-bold text-earth-800 mb-1">Cycle Start Date</label>
-                <input id="cycle-start-input" type="date" value="${appState.cycle.startDate}" required class="w-full px-3 py-2.5 rounded-xl bg-earth-50 border border-earth-200 text-xs font-bold" />
-              </div>
-              <div>
-                <label class="block text-xs font-bold text-earth-800 mb-1">Duration (Days)</label>
-                <input id="cycle-days-input" type="number" min="1" max="120" value="${appState.cycle.durationDays}" required class="w-full px-3 py-2.5 rounded-xl bg-earth-50 border border-earth-200 text-xs font-bold" />
-              </div>
-            </div>
-            <button type="submit" class="w-full py-3 rounded-xl bg-farm-800 text-white text-xs font-bold shadow-sm">Save Cycle Settings</button>
-          </form>
+            ${appState.groups.map(g => {
+              const gCfg = getGroupCycleConfig(g.id);
+              const gDay = getCycleDayInfo(g.id);
+              return `
+                <form onsubmit="saveGroupCycleSettings(event, '${g.id}')" class="bg-earth-50 border border-earth-200 rounded-2xl p-3 space-y-2.5">
+                  <div class="flex items-center justify-between">
+                    <div class="flex items-center gap-2">
+                      <span class="px-2 py-0.5 rounded-md bg-farm-900 text-white text-[10px] font-extrabold">${escapeHtml(g.name)}</span>
+                      <span class="text-[11px] font-bold text-earth-600">${escapeHtml(g.code)}</span>
+                    </div>
+                    <span class="text-[11px] font-extrabold text-farm-800">Day ${gDay.dayNum}/${gDay.totalDays}</span>
+                  </div>
+                  <div>
+                    <label class="block text-[11px] font-bold text-earth-700 mb-1">Batch / Cycle Name</label>
+                    <input id="grp-cycle-name-${g.id}" type="text" value="${escapeHtml(gCfg.name)}" required class="w-full px-3 py-2 rounded-xl bg-white border border-earth-200 text-xs font-bold" />
+                  </div>
+                  <div class="grid grid-cols-2 gap-2">
+                    <div>
+                      <label class="block text-[11px] font-bold text-earth-700 mb-1">Start Date</label>
+                      <input id="grp-cycle-start-${g.id}" type="date" value="${gCfg.startDate}" required class="w-full px-2.5 py-2 rounded-xl bg-white border border-earth-200 text-xs font-bold" />
+                    </div>
+                    <div>
+                      <label class="block text-[11px] font-bold text-earth-700 mb-1">Duration (Days)</label>
+                      <input id="grp-cycle-days-${g.id}" type="number" min="1" max="120" value="${gCfg.durationDays}" required class="w-full px-2.5 py-2 rounded-xl bg-white border border-earth-200 text-xs font-bold" />
+                    </div>
+                  </div>
+                  <button type="submit" class="w-full py-2.5 rounded-xl bg-farm-800 hover:bg-farm-900 text-white text-xs font-bold shadow-2xs">Save ${escapeHtml(g.name)} Cycle</button>
+                </form>
+              `;
+            }).join('')}
+          </div>
 
           <!-- App Access Passwords Form -->
           <form onsubmit="saveSecurityPasswords(event)" class="bg-white rounded-3xl p-4 shadow-soft border border-earth-200/70 space-y-3">
@@ -3105,12 +3183,35 @@
 
     function deleteFeedType(id) {
       if (appState.feedTypes.length <= 1) {
-        showSnackbar('At least 1 feed type is required', 'error');
+        showSnackbar('At least 1 feed type must remain', 'error');
         return;
       }
-      appState.feedTypes = appState.feedTypes.filter(f => f.id !== id);
+      appState.feedTypes = appState.feedTypes.filter(ft => ft.id !== id);
       saveState(true);
-      showSnackbar('Feed type deleted', 'success');
+      showSnackbar('Feed type removed', 'success');
+      renderApp();
+    }
+
+    function saveGroupCycleSettings(e, groupId) {
+      e.preventDefault();
+      const grp = appState.groups.find(g => g.id === groupId);
+      if (!grp) return;
+      const nameVal = document.getElementById(`grp-cycle-name-${groupId}`).value.trim();
+      const startVal = document.getElementById(`grp-cycle-start-${groupId}`).value;
+      const daysVal = parseInt(document.getElementById(`grp-cycle-days-${groupId}`).value, 10) || 60;
+
+      grp.cycleName = nameVal || 'Cycle 76';
+      grp.cycleStartDate = startVal;
+      grp.cycleDurationDays = daysVal;
+
+      if (groupId === appState.groups[0]?.id) {
+        appState.cycle.name = grp.cycleName;
+        appState.cycle.startDate = grp.cycleStartDate;
+        appState.cycle.durationDays = grp.cycleDurationDays;
+      }
+
+      saveState(true);
+      showSnackbar(`${grp.name} cycle settings updated`, 'success');
       renderApp();
     }
 
