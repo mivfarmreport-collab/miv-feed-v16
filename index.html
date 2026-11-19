@@ -588,6 +588,7 @@
       reportGroupFilter: 'all',
       reportHouseFilter: 'all',
       reportTypeFilter: 'all',
+      reportDeliveryMode: 'silo',
       reportSearch: '',
       dropboxSyncing: false,
       dropboxError: null,
@@ -2746,6 +2747,11 @@
         if (uiState.reportGroupFilter !== 'all' && r.groupId !== uiState.reportGroupFilter) return false;
         if (uiState.reportHouseFilter !== 'all' && r.houseId !== uiState.reportHouseFilter) return false;
         if (uiState.reportTypeFilter !== 'all' && r.entryType !== uiState.reportTypeFilter) return false;
+        if (uiState.reportTypeFilter === 'input') {
+          const isSiloRec = Number(r.siloTon) > 0;
+          if (uiState.reportDeliveryMode === 'silo' && !isSiloRec) return false;
+          if (uiState.reportDeliveryMode === 'bags' && isSiloRec) return false;
+        }
 
         if (uiState.reportSearch.trim()) {
           const q = uiState.reportSearch.trim().toLowerCase();
@@ -2826,6 +2832,20 @@
                 <option value="input" ${uiState.reportTypeFilter === 'input' ? 'selected' : ''}>Delivery Only</option>
               </select>
             </div>
+
+            ${uiState.reportTypeFilter === 'input' ? `
+              <!-- Delivery Sub-Option: Bags Delivery vs Silo Delivery -->
+              <div class="grid grid-cols-2 gap-1.5 p-1 bg-blue-50/80 border border-blue-200 rounded-2xl">
+                <button type="button" onclick="uiState.reportDeliveryMode='bags'; renderApp()" class="py-2 px-3 rounded-xl text-[11px] font-extrabold flex items-center justify-center gap-1.5 transition ${uiState.reportDeliveryMode === 'bags' ? 'bg-white text-farm-900 shadow-2xs' : 'text-earth-600 hover:text-earth-900'}">
+                  <i data-lucide="package" class="w-3.5 h-3.5"></i>
+                  <span>Bags Delivery</span>
+                </button>
+                <button type="button" onclick="uiState.reportDeliveryMode='silo'; renderApp()" class="py-2 px-3 rounded-xl text-[11px] font-extrabold flex items-center justify-center gap-1.5 transition ${uiState.reportDeliveryMode === 'silo' ? 'bg-blue-700 text-white shadow-2xs' : 'text-earth-600 hover:text-earth-900'}">
+                  <i data-lucide="cylinder" class="w-3.5 h-3.5"></i>
+                  <span>Silo Delivery</span>
+                </button>
+              </div>
+            ` : ''}
 
             <!-- Search DO / Lorry / Worker / House -->
             <div class="relative">
@@ -2908,33 +2928,50 @@
 
         tables.push({ title: 'HOPPER INPUT REPORT', headers, rows, totalRow });
       } else if (uiState.reportTypeFilter === 'input') {
-        // FORMAT B: DELIVERY (SILO FORMAT & BAG FORMAT)
-        const siloRecs = records.filter(r => Number(r.siloTon) > 0);
-        const bagRecs = records.filter(r => !(Number(r.siloTon) > 0));
-
-        if (siloRecs.length > 0) {
+        // FORMAT B: DELIVERY (SILO FORMAT OR BAGS FORMAT)
+        if (uiState.reportDeliveryMode === 'silo') {
+          const siloRecs = records.filter(r => Number(r.siloTon) > 0);
           const headers = ['DATE', 'DO NUMBER', 'LORRY NUMBER', 'TOTAL SILO'];
           let sumSilo = 0;
-          const rows = siloRecs.map(r => {
+
+          // Combine rows with the same Date, DO Number & Lorry Number
+          const groupedMap = new Map();
+          siloRecs.forEach(r => {
+            const dateStr = formatDateOnly(r.datetime);
+            const doStr = (r.doNumber || '-').trim();
+            const lorryStr = (r.lorryNumber || '-').trim().toUpperCase();
+            const key = `${dateStr}||${doStr.toUpperCase()}||${lorryStr}`;
             const t = Number(r.siloTon) || 0;
             sumSilo += t;
-            return [
-              formatDateOnly(r.datetime),
-              r.doNumber || '-',
-              r.lorryNumber || '-',
-              `${t} T`
-            ];
+
+            if (groupedMap.has(key)) {
+              groupedMap.get(key).totalSilo += t;
+            } else {
+              groupedMap.set(key, {
+                date: dateStr,
+                doNumber: doStr,
+                lorryNumber: lorryStr,
+                totalSilo: t
+              });
+            }
           });
+
+          const rows = Array.from(groupedMap.values()).map(item => [
+            item.date,
+            item.doNumber,
+            item.lorryNumber,
+            `${Math.round(item.totalSilo * 10) / 10} T`
+          ]);
+
           tables.push({
             title: 'DELIVERY REPORT (SILO)',
             headers,
             rows,
             totalRow: ['FINAL TOTAL SILO', '', '', `${Math.round(sumSilo * 10) / 10} T`]
           });
-        }
-
-        if (bagRecs.length > 0) {
-          const headers = ['DATE', 'DO NUMBER', 'LORRY NUMBER', 'TOTAL BAG'];
+        } else {
+          const bagRecs = records.filter(r => !(Number(r.siloTon) > 0));
+          const headers = ['DATE', 'DO NUMBER', 'LORRY NUMBER', 'TOTAL BAGS'];
           let sumBags = 0;
           const rows = bagRecs.map(r => {
             const b = Number(r.bags) || 0;
@@ -2947,10 +2984,10 @@
             ];
           });
           tables.push({
-            title: 'DELIVERY REPORT (BAG)',
+            title: 'DELIVERY REPORT (BAGS)',
             headers,
             rows,
-            totalRow: ['FINAL TOTAL', '', '', sumBags]
+            totalRow: ['FINAL TOTAL BAGS', '', '', sumBags]
           });
         }
       } else {
@@ -3007,7 +3044,8 @@
       });
 
       const csvContent = csvBlocks.join('\n\n');
-      const filename = `MIV_Feed_Report_${uiState.reportTypeFilter}_${uiState.reportPeriod}_${new Date().toISOString().slice(0, 10)}.csv`;
+      const modeSuffix = uiState.reportTypeFilter === 'input' ? `_${uiState.reportDeliveryMode}` : '';
+      const filename = `MIV_Feed_Report_${uiState.reportTypeFilter}${modeSuffix}_${uiState.reportPeriod}_${new Date().toISOString().slice(0, 10)}.csv`;
 
       const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
       const url = URL.createObjectURL(blob);
