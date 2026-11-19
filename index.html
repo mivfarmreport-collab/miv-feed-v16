@@ -586,6 +586,7 @@
       adminSubTab: 'groups',
       reportPeriod: 'daily',
       reportGroupFilter: 'all',
+      reportHouseFilter: 'all',
       reportTypeFilter: 'all',
       reportSearch: '',
       dropboxSyncing: false,
@@ -1853,6 +1854,11 @@
       if (!groupHouses.some(h => h.id === uiState.selectedHouseId)) {
         uiState.selectedHouseId = groupHouses.length ? groupHouses[0].id : (appState.houses[0]?.id || '');
       }
+      const nonStoreHouses = groupHouses.filter(h => !(h.isStore || String(h.name).trim().toUpperCase() === 'STORE'));
+      const isSiloDeliveryMode = uiState.selectedEntryType === 'input' && uiState.deliveryUnitMode === 'silo';
+      if (isSiloDeliveryMode && nonStoreHouses.length > 0 && !nonStoreHouses.some(h => h.id === uiState.selectedHouseId)) {
+        uiState.selectedHouseId = nonStoreHouses[0].id;
+      }
       const houseWorkers = appState.workers.filter(w => w.houseId === uiState.selectedHouseId);
       const availableWorkers = houseWorkers.length > 0 ? houseWorkers : appState.workers;
       if (!availableWorkers.some(w => w.id === uiState.selectedWorkerId) && availableWorkers.length) {
@@ -2002,6 +2008,24 @@
                 ` : ''}
 
                 ${isDelivery && uiState.deliveryUnitMode === 'silo' ? `
+                  <div class="mb-3">
+                    <div class="flex items-center justify-between mb-1.5">
+                      <label class="block text-xs font-extrabold text-earth-900">Select House No (${escapeHtml(activeGroup?.name || 'FARM A')}) *</label>
+                      <span class="text-[11px] font-bold text-blue-700">Proceeds to Hopper</span>
+                    </div>
+                    <div class="flex flex-wrap gap-2">
+                      ${(nonStoreHouses.length ? nonStoreHouses : groupHouses).map(h => {
+                        const selected = uiState.selectedHouseId === h.id;
+                        return `
+                          <button type="button" onclick="selectWorkerHouse('${h.id}')" class="px-3.5 py-2 rounded-full border text-xs font-extrabold flex items-center gap-1.5 transition ${selected ? 'bg-blue-700 text-white border-blue-700 shadow-sm' : 'bg-earth-50 text-earth-800 border-earth-200 hover:bg-earth-100'}">
+                            <i data-lucide="home" class="w-3.5 h-3.5 ${selected ? 'text-blue-200' : 'text-earth-500'}"></i>
+                            <span>${escapeHtml(h.name)}</span>
+                          </button>
+                        `;
+                      }).join('')}
+                    </div>
+                  </div>
+
                   <div class="flex items-center justify-between mb-1.5">
                     <label class="block text-xs font-extrabold text-earth-900">Silo Delivery *</label>
                     <span id="silo-equiv-display" class="text-[11px] font-bold text-blue-800 bg-blue-50 px-2 py-0.5 rounded-lg border border-blue-200">= ${Math.round((Number(uiState.siloTons) || 0) * 20)} Bags (${((Number(uiState.siloTons) || 0) * 1000).toLocaleString()} kg)</span>
@@ -2024,7 +2048,7 @@
                     <button type="button" onclick="adjustBagCount(-5)" class="w-11 h-11 rounded-xl bg-white border border-earth-200 text-earth-800 font-extrabold text-sm active:scale-95 transition shadow-2xs">-5</button>
                     <button type="button" onclick="adjustBagCount(-1)" class="w-11 h-11 rounded-xl bg-white border border-earth-200 text-earth-800 font-extrabold text-base active:scale-95 transition shadow-2xs">-1</button>
                     <div class="flex-1 text-center">
-                      <input id="input-bag-count" type="number" min="${!isDelivery && Number(uiState.hopperSiloTons) > 0 ? '0' : '1'}" max="5000" value="${uiState.bagCount}" oninput="setBagCountInput(this.value)" required class="w-full text-center bg-transparent text-2xl font-extrabold text-earth-900 focus:outline-none" />
+                      <input id="input-bag-count" type="number" min="1" max="5000" value="${uiState.bagCount}" oninput="setBagCountInput(this.value)" required class="w-full text-center bg-transparent text-2xl font-extrabold text-earth-900 focus:outline-none" />
                     </div>
                     <button type="button" onclick="adjustBagCount(1)" class="w-11 h-11 rounded-xl bg-white border border-earth-200 text-earth-800 font-extrabold text-base active:scale-95 transition shadow-2xs">+1</button>
                     <button type="button" onclick="adjustBagCount(5)" class="w-11 h-11 rounded-xl bg-farm-800 text-white font-extrabold text-sm active:scale-95 transition shadow-2xs">+5</button>
@@ -2057,27 +2081,6 @@
                 <label class="block text-xs font-extrabold text-earth-900 mb-1.5">7. Date &amp; Time *</label>
                 <input id="input-datetime" type="datetime-local" value="${getCurrentLocalDateTimeInput()}" required class="w-full px-3.5 py-2.5 rounded-2xl bg-earth-50 border border-earth-200 text-xs font-semibold text-earth-900 focus:outline-none focus:ring-2 focus:ring-farm-700" />
               </div>
-
-              <!-- 8. Total Silo Input to Hopper (Only shown under Hopper Input) -->
-              ${!isDelivery ? `
-                <div class="bg-amber-50/70 border border-amber-200/90 rounded-2xl p-3 space-y-2 fade-in">
-                  <div class="flex items-center justify-between">
-                    <label class="block text-xs font-extrabold text-amber-950">8. Total Silo Input to Hopper</label>
-                    <span id="hopper-silo-equiv-display" class="text-[11px] font-bold text-amber-900 bg-amber-100/80 px-2 py-0.5 rounded-lg border border-amber-200">
-                      ${Number(uiState.hopperSiloTons) > 0 ? `= ${Math.round(Number(uiState.hopperSiloTons) * 20)} Bags (${(Number(uiState.hopperSiloTons) * 1000).toLocaleString()} kg)` : 'Optional (1 Ton = 20 Bags)'}
-                    </span>
-                  </div>
-                  <div class="flex items-center gap-2 bg-white p-2 rounded-2xl border border-amber-200">
-                    <button type="button" onclick="adjustHopperSiloTon(-1)" class="w-10 h-10 rounded-xl bg-amber-50 border border-amber-200 text-amber-950 font-extrabold text-sm active:scale-95 transition">-1</button>
-                    <button type="button" onclick="adjustHopperSiloTon(-0.5)" class="w-10 h-10 rounded-xl bg-amber-50 border border-amber-200 text-amber-950 font-extrabold text-xs active:scale-95 transition">-0.5</button>
-                    <div class="flex-1 text-center">
-                      <input id="input-hopper-silo-tons" type="number" step="0.1" min="0" max="30" value="${uiState.hopperSiloTons || ''}" placeholder="0" oninput="setHopperSiloTonInput(this.value)" class="w-full text-center bg-transparent text-xl font-extrabold text-amber-950 focus:outline-none" />
-                    </div>
-                    <button type="button" onclick="adjustHopperSiloTon(0.5)" class="w-10 h-10 rounded-xl bg-amber-50 border border-amber-200 text-amber-950 font-extrabold text-xs active:scale-95 transition">+0.5</button>
-                    <button type="button" onclick="adjustHopperSiloTon(1)" class="w-10 h-10 rounded-xl bg-amber-600 text-white font-extrabold text-sm active:scale-95 transition">+1</button>
-                  </div>
-                </div>
-              ` : ''}
 
               <!-- Submit CTA Button -->
               <button type="submit" class="w-full py-3.5 px-4 rounded-2xl bg-farm-800 hover:bg-farm-900 active:scale-[0.99] text-white font-extrabold text-sm tracking-wide flex items-center justify-center gap-2 shadow-float transition">
@@ -2310,7 +2313,7 @@
                         <span class="px-2 py-0.5 rounded-md text-[10px] font-extrabold ${isOut ? 'bg-amber-100 text-amber-900' : 'bg-emerald-100 text-emerald-900'}">
                           ${isOut ? 'HOPPER' : 'DELIVERY'}
                         </span>
-                        <span class="text-xs font-extrabold text-earth-900">${escapeHtml(grp?.name || 'Group')}${!isOut && house ? ` • ${escapeHtml(house.name)}` : ''}</span>
+                        <span class="text-xs font-extrabold text-earth-900">${escapeHtml(grp?.name || 'Group')}${house ? ` • ${escapeHtml(house.name)}` : ''}</span>
                       </div>
                       <p class="text-xs font-semibold text-earth-700 mt-1">
                         ${escapeHtml(ft?.code || '')} ${escapeHtml(ft?.name || 'Feed')}
@@ -2362,6 +2365,13 @@
 
     function setDeliveryUnitMode(mode) {
       uiState.deliveryUnitMode = mode;
+      if (mode === 'silo') {
+        const groupHouses = getSortedGroupHouses(uiState.selectedGroupId);
+        const nonStore = groupHouses.filter(h => !(h.isStore || String(h.name).trim().toUpperCase() === 'STORE'));
+        if (nonStore.length > 0 && !nonStore.some(h => h.id === uiState.selectedHouseId)) {
+          uiState.selectedHouseId = nonStore[0].id;
+        }
+      }
       renderApp();
     }
 
@@ -2526,9 +2536,11 @@
       const newRec = {
         id: 'rec-' + Date.now(),
         groupId: uiState.selectedGroupId,
-        houseId: isDelivery
-          ? (appState.houses.find(h => h.groupId === uiState.selectedGroupId && (h.isStore || String(h.name).trim().toUpperCase() === 'STORE'))?.id || null)
-          : uiState.selectedHouseId,
+        houseId: isSiloDelivery
+          ? uiState.selectedHouseId
+          : (isDelivery
+              ? (appState.houses.find(h => h.groupId === uiState.selectedGroupId && (h.isStore || String(h.name).trim().toUpperCase() === 'STORE'))?.id || null)
+              : uiState.selectedHouseId),
         workerId: workerId,
         feedTypeId: uiState.selectedFeedTypeId,
         entryType: uiState.selectedEntryType,
@@ -2543,12 +2555,34 @@
 
       appState.records.unshift(newRec);
       triggerHeadsUpNotification(newRec);
+
+      if (isSiloDelivery && uiState.selectedHouseId) {
+        const hopperRec = {
+          id: 'rec-' + (Date.now() + 1),
+          groupId: uiState.selectedGroupId,
+          houseId: uiState.selectedHouseId,
+          workerId: workerId,
+          feedTypeId: uiState.selectedFeedTypeId,
+          entryType: 'output',
+          bags: finalBags,
+          siloTon: siloTonValue,
+          doNumber: doNumber,
+          lorryNumber: lorryNumber,
+          datetime: datetimeVal,
+          updatedAt: new Date().toISOString(),
+          _localDirty: true
+        };
+        appState.records.unshift(hopperRec);
+        triggerHeadsUpNotification(hopperRec);
+      }
+
       saveState(true);
 
       uiState.hopperSiloTons = 0;
 
+      const selectedHouseObj = appState.houses.find(h => h.id === uiState.selectedHouseId);
       const labelMsg = isSiloDelivery
-        ? `Logged Silo Delivery to Store: ${siloTonValue}T (${finalBags} bags)`
+        ? `Logged Silo Delivery: ${siloTonValue}T (${finalBags} bags) -> Proceeded to ${selectedHouseObj?.name || 'House'} Hopper`
         : (isDelivery
             ? `Logged Bag Delivery to Store: ${finalBags} bags (${(finalBags * 50).toLocaleString()} kg)`
             : (!isDelivery && siloTonValue
@@ -2663,14 +2697,17 @@
                     <span class="text-[10px] font-bold uppercase tracking-wider text-earth-400 block">House Breakdown</span>
                     ${groupHouses.map(h => {
                       const hm = calculateHouseMetrics(h.id, cycleRecs);
+                      const isStore = hm.isStore;
+                      const displayBags = isStore ? hm.inputBags : hm.outputBags;
+                      const displayKg = displayBags * 50;
                       return `
                         <div class="flex items-center justify-between text-xs py-1 px-2 rounded-lg bg-earth-50/70">
                           <div>
                             <span class="font-bold text-earth-800">${escapeHtml(h.name)}</span>
                           </div>
                           <div class="text-right">
-                            <span class="font-bold text-amber-800">Out: ${hm.outputBags} bags</span>
-                            <span class="text-[10px] text-earth-500 ml-1">(${hm.outputKg.toLocaleString()} kg)</span>
+                            <span class="font-bold ${isStore ? 'text-emerald-800' : 'text-amber-800'}">${isStore ? 'In:' : 'Out:'} ${displayBags} bags</span>
+                            <span class="text-[10px] text-earth-500 ml-1">(${displayKg.toLocaleString()} kg)</span>
                           </div>
                         </div>
                       `;
@@ -2707,6 +2744,7 @@
         }
 
         if (uiState.reportGroupFilter !== 'all' && r.groupId !== uiState.reportGroupFilter) return false;
+        if (uiState.reportHouseFilter !== 'all' && r.houseId !== uiState.reportHouseFilter) return false;
         if (uiState.reportTypeFilter !== 'all' && r.entryType !== uiState.reportTypeFilter) return false;
 
         if (uiState.reportSearch.trim()) {
@@ -2724,6 +2762,9 @@
 
     function renderAdminReportsView() {
       const filtered = getFilteredReportRecords();
+      const reportHouses = uiState.reportGroupFilter === 'all'
+        ? appState.houses
+        : getSortedGroupHouses(uiState.reportGroupFilter);
       let inBags = 0, outBags = 0;
       filtered.forEach(r => {
         if (r.entryType === 'input') inBags += Number(r.bags) || 0;
@@ -2734,15 +2775,21 @@
         <div class="space-y-4 fade-in">
           <!-- Report Filters & Export Card -->
           <div class="bg-white rounded-3xl p-4 shadow-card border border-earth-200/70 space-y-3">
-            <div class="flex items-center justify-between">
+            <div class="flex items-center justify-between gap-2">
               <div>
                 <h2 class="text-sm font-extrabold text-earth-900">Feed Reports &amp; CSV Export</h2>
                 <p class="text-[11px] text-earth-500">Filter by Daily, Weekly, or 60-Day Cycle</p>
               </div>
-              <button onclick="exportFilteredReportCsv()" class="py-2 px-3.5 rounded-xl bg-farm-800 hover:bg-farm-900 text-white text-xs font-bold flex items-center gap-1.5 shadow-sm transition">
-                <i data-lucide="download" class="w-3.5 h-3.5"></i>
-                <span>Export CSV</span>
-              </button>
+              <div class="flex items-center gap-1.5 shrink-0">
+                <button onclick="printFilteredReportPdf()" class="py-2 px-3 rounded-xl bg-white hover:bg-earth-50 text-earth-900 border border-earth-300 text-xs font-bold flex items-center gap-1 shadow-2xs transition">
+                  <i data-lucide="printer" class="w-3.5 h-3.5"></i>
+                  <span>Print / PDF</span>
+                </button>
+                <button onclick="exportFilteredReportCsv()" class="py-2 px-3 rounded-xl bg-farm-800 hover:bg-farm-900 text-white text-xs font-bold flex items-center gap-1.5 shadow-sm transition">
+                  <i data-lucide="download" class="w-3.5 h-3.5"></i>
+                  <span>Export CSV</span>
+                </button>
+              </div>
             </div>
 
             <!-- Period Tabs -->
@@ -2759,13 +2806,21 @@
               `).join('')}
             </div>
 
-            <!-- Group & Type Selectors -->
-            <div class="grid grid-cols-2 gap-2">
-              <select onchange="uiState.reportGroupFilter=this.value; renderApp()" class="px-3 py-2 rounded-xl bg-earth-50 border border-earth-200 text-xs font-bold text-earth-800">
+            <!-- Group, House & Type Selectors -->
+            <div class="grid grid-cols-3 gap-2">
+              <select onchange="uiState.reportGroupFilter=this.value; uiState.reportHouseFilter='all'; renderApp()" class="px-2.5 py-2 rounded-xl bg-earth-50 border border-earth-200 text-xs font-bold text-earth-800">
                 <option value="all" ${uiState.reportGroupFilter === 'all' ? 'selected' : ''}>All 4 Groups</option>
                 ${appState.groups.map(g => `<option value="${g.id}" ${uiState.reportGroupFilter === g.id ? 'selected' : ''}>${escapeHtml(g.name)}</option>`).join('')}
               </select>
-              <select onchange="uiState.reportTypeFilter=this.value; renderApp()" class="px-3 py-2 rounded-xl bg-earth-50 border border-earth-200 text-xs font-bold text-earth-800">
+              <select onchange="uiState.reportHouseFilter=this.value; renderApp()" class="px-2.5 py-2 rounded-xl bg-earth-50 border border-earth-200 text-xs font-bold text-earth-800">
+                <option value="all" ${uiState.reportHouseFilter === 'all' ? 'selected' : ''}>All Houses</option>
+                ${reportHouses.map(h => {
+                  const grp = appState.groups.find(g => g.id === h.groupId);
+                  const label = uiState.reportGroupFilter === 'all' ? `${grp?.name || ''} - ${h.name}` : h.name;
+                  return `<option value="${h.id}" ${uiState.reportHouseFilter === h.id ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+                }).join('')}
+              </select>
+              <select onchange="uiState.reportTypeFilter=this.value; renderApp()" class="px-2.5 py-2 rounded-xl bg-earth-50 border border-earth-200 text-xs font-bold text-earth-800">
                 <option value="all" ${uiState.reportTypeFilter === 'all' ? 'selected' : ''}>Hopper &amp; Delivery</option>
                 <option value="output" ${uiState.reportTypeFilter === 'output' ? 'selected' : ''}>Hopper Input Only</option>
                 <option value="input" ${uiState.reportTypeFilter === 'input' ? 'selected' : ''}>Delivery Only</option>
@@ -2774,34 +2829,163 @@
 
             <!-- Search DO / Lorry / Worker / House -->
             <div class="relative">
-              <i data-lucide="search" class="w-4 h-4 text-earth-400 absolute left-3 top-2.5"></i>
-              <input type="text" value="${escapeHtml(uiState.reportSearch)}" oninput="uiState.reportSearch=this.value; renderApp()" placeholder="Search DO No, Lorry No, Worker, House..." class="w-full pl-9 pr-3 py-2 rounded-xl bg-earth-50 border border-earth-200 text-xs font-medium focus:outline-none focus:ring-2 focus:ring-farm-700" />
+              <i data-lucide="search" class="w-4 h-4 text-earth-400 absolute left-3.5 top-3"></i>
+              <input type="text" value="${escapeHtml(uiState.reportSearch)}" oninput="uiState.reportSearch=this.value; renderApp()" placeholder="Search DO No., Lorry No., Worker, House..." class="w-full pl-9 pr-3.5 py-2.5 rounded-xl bg-earth-50 border border-earth-200 text-xs font-medium text-earth-900 focus:outline-none focus:ring-2 focus:ring-farm-700" />
             </div>
 
-            <!-- Summary Totals for Filtered View -->
+            <!-- Totals Summary for Filtered View -->
             <div class="grid grid-cols-3 gap-2 pt-1">
-              <div class="bg-emerald-50 rounded-xl p-2 text-center">
-                <span class="text-[10px] font-bold text-emerald-700 block">Delivery In</span>
-                <span class="text-xs font-extrabold text-emerald-950">${inBags} bags</span>
+              <div class="bg-emerald-50 border border-emerald-200/80 rounded-2xl p-2.5 text-center">
+                <span class="text-[10px] font-bold text-emerald-800 block">Delivery (In)</span>
+                <span class="text-sm font-extrabold text-emerald-950">${inBags} bags</span>
               </div>
-              <div class="bg-amber-50 rounded-xl p-2 text-center">
-                <span class="text-[10px] font-bold text-amber-700 block">Hopper Out</span>
-                <span class="text-xs font-extrabold text-amber-950">${outBags} bags</span>
+              <div class="bg-amber-50 border border-amber-200/80 rounded-2xl p-2.5 text-center">
+                <span class="text-[10px] font-bold text-amber-800 block">Hopper (Out)</span>
+                <span class="text-sm font-extrabold text-amber-950">${outBags} bags</span>
               </div>
-              <div class="bg-farm-50 rounded-xl p-2 text-center">
-                <span class="text-[10px] font-bold text-farm-700 block">Net Diff</span>
-                <span class="text-xs font-extrabold text-farm-950">${inBags - outBags} bags</span>
+              <div class="bg-farm-50 border border-farm-200/80 rounded-2xl p-2.5 text-center">
+                <span class="text-[10px] font-bold text-farm-800 block">Net Diff</span>
+                <span class="text-sm font-extrabold text-farm-950">${inBags - outBags} bags</span>
               </div>
             </div>
           </div>
 
           <!-- Filtered Records List -->
           <div class="space-y-2">
-            <span class="text-xs font-extrabold uppercase tracking-wider text-earth-500 px-1">${filtered.length} Matching Records</span>
+            <span class="text-[11px] font-bold text-earth-500 px-1 block">Showing ${filtered.length} matching records</span>
             ${renderRecordsList(filtered)}
           </div>
         </div>
       `;
+    }
+
+    function buildStructuredReportTables(records) {
+      const formatDateOnly = (dt) => {
+        if (!dt) return '';
+        const d = new Date(dt);
+        if (isNaN(d.getTime())) return dt.slice(0, 10);
+        return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+      };
+
+      const tables = [];
+
+      if (uiState.reportTypeFilter === 'output') {
+        // FORMAT A: HOPPER INPUT -> DATE / HOUSE NUMBER / OUT SILO / OUT BAG / TOTAL BAG (OUT SILO + OUT BAG)
+        const headers = ['DATE', 'HOUSE NUMBER', 'OUT SILO', 'OUT BAG', 'TOTAL BAG (OUT SILO + OUT BAG)'];
+        let totalOutSilo = 0;
+        let totalOutBag = 0;
+        let grandTotalBags = 0;
+
+        const rows = records.map(r => {
+          const grp = appState.groups.find(g => g.id === r.groupId)?.name || '';
+          const houseName = appState.houses.find(h => h.id === r.houseId)?.name || '-';
+          const houseLabel = uiState.reportGroupFilter === 'all' && grp ? `${grp} - ${houseName}` : houseName;
+          const siloTons = Number(r.siloTon) || 0;
+          const siloInBags = siloTons > 0 ? Math.round(siloTons * 20) : 0;
+          const totalBags = Number(r.bags) || 0;
+          const outBagOnly = Math.max(0, totalBags - siloInBags);
+
+          totalOutSilo += siloTons;
+          totalOutBag += outBagOnly;
+          grandTotalBags += totalBags;
+
+          return [
+            formatDateOnly(r.datetime),
+            houseLabel,
+            siloTons > 0 ? `${siloTons} T (${siloInBags} bags)` : '0',
+            outBagOnly,
+            totalBags
+          ];
+        });
+
+        const totalRow = [
+          'FINAL TOTAL',
+          '',
+          `${Math.round(totalOutSilo * 10) / 10} T (${Math.round(totalOutSilo * 20)} bags)`,
+          totalOutBag,
+          grandTotalBags
+        ];
+
+        tables.push({ title: 'HOPPER INPUT REPORT', headers, rows, totalRow });
+      } else if (uiState.reportTypeFilter === 'input') {
+        // FORMAT B: DELIVERY (SILO FORMAT & BAG FORMAT)
+        const siloRecs = records.filter(r => Number(r.siloTon) > 0);
+        const bagRecs = records.filter(r => !(Number(r.siloTon) > 0));
+
+        if (siloRecs.length > 0) {
+          const headers = ['DATE', 'DO NUMBER', 'LORRY NUMBER', 'TOTAL SILO'];
+          let sumSilo = 0;
+          const rows = siloRecs.map(r => {
+            const t = Number(r.siloTon) || 0;
+            sumSilo += t;
+            return [
+              formatDateOnly(r.datetime),
+              r.doNumber || '-',
+              r.lorryNumber || '-',
+              `${t} T`
+            ];
+          });
+          tables.push({
+            title: 'DELIVERY REPORT (SILO)',
+            headers,
+            rows,
+            totalRow: ['FINAL TOTAL SILO', '', '', `${Math.round(sumSilo * 10) / 10} T`]
+          });
+        }
+
+        if (bagRecs.length > 0) {
+          const headers = ['DATE', 'DO NUMBER', 'LORRY NUMBER', 'TOTAL BAG'];
+          let sumBags = 0;
+          const rows = bagRecs.map(r => {
+            const b = Number(r.bags) || 0;
+            sumBags += b;
+            return [
+              formatDateOnly(r.datetime),
+              r.doNumber || '-',
+              r.lorryNumber || '-',
+              b
+            ];
+          });
+          tables.push({
+            title: 'DELIVERY REPORT (BAG)',
+            headers,
+            rows,
+            totalRow: ['FINAL TOTAL', '', '', sumBags]
+          });
+        }
+      } else {
+        // Combined Hopper & Delivery view
+        const headers = ['DATE', 'TYPE', 'HOUSE / DO & LORRY', 'SILO (T)', 'TOTAL BAG'];
+        let sumSilo = 0;
+        let netBags = 0;
+        const rows = records.map(r => {
+          const grp = appState.groups.find(g => g.id === r.groupId)?.name || '';
+          const house = appState.houses.find(h => h.id === r.houseId)?.name || '';
+          const isOut = r.entryType === 'output';
+          const t = Number(r.siloTon) || 0;
+          const b = Number(r.bags) || 0;
+          sumSilo += t;
+          netBags += isOut ? -b : b;
+          const detail = isOut
+            ? `${grp} ${house}`.trim()
+            : `${grp} ${r.doNumber ? 'DO:' + r.doNumber : ''} ${r.lorryNumber ? 'Lorry:' + r.lorryNumber : ''}`.trim();
+          return [
+            formatDateOnly(r.datetime),
+            isOut ? 'HOPPER INPUT' : 'DELIVERY',
+            detail,
+            t > 0 ? `${t} T` : '-',
+            isOut ? `-${b}` : `+${b}`
+          ];
+        });
+        tables.push({
+          title: 'COMBINED FEED REPORT (HOPPER & DELIVERY)',
+          headers,
+          rows,
+          totalRow: ['FINAL TOTAL', '', '', `${Math.round(sumSilo * 10) / 10} T`, netBags]
+        });
+      }
+
+      return tables;
     }
 
     async function exportFilteredReportCsv() {
@@ -2811,32 +2995,19 @@
         return;
       }
 
-      const headers = ['Record ID', 'Date & Time', 'Type', 'Farm Group', 'House', 'Worker', 'Feed Code', 'Feed Type', 'Silo (Ton)', 'Bags (50kg)', 'Total Weight (kg)', 'DO Number', 'Lorry Number'];
-      const rows = records.map(r => {
-        const grp = appState.groups.find(g => g.id === r.groupId)?.name || '';
-        const house = r.entryType === 'input' ? '' : (appState.houses.find(h => h.id === r.houseId)?.name || '');
-        const worker = appState.workers.find(w => w.id === r.workerId)?.name || '';
-        const ft = appState.feedTypes.find(f => f.id === r.feedTypeId);
-        const typeLabel = r.entryType === 'input' ? (r.siloTon ? 'Silo Delivery (In)' : 'Delivery (In)') : 'Hopper Input (Out)';
+      const tables = buildStructuredReportTables(records);
+      const csvBlocks = tables.map(tbl => {
+        const escapeCsvRow = (arr) => arr.map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',');
         return [
-          r.id,
-          r.datetime.replace('T', ' '),
-          typeLabel,
-          grp,
-          house,
-          worker,
-          ft?.code || '',
-          ft?.name || '',
-          r.siloTon || '',
-          r.bags,
-          (Number(r.bags) || 0) * 50,
-          r.doNumber || '',
-          r.lorryNumber || ''
-        ].map(v => `"${String(v).replace(/"/g, '""')}"`).join(',');
+          `"${tbl.title}"`,
+          escapeCsvRow(tbl.headers),
+          ...tbl.rows.map(escapeCsvRow),
+          escapeCsvRow(tbl.totalRow)
+        ].join('\n');
       });
 
-      const csvContent = [headers.join(','), ...rows].join('\n');
-      const filename = `MIV_Feed_Report_${uiState.reportPeriod}_${new Date().toISOString().slice(0, 10)}.csv`;
+      const csvContent = csvBlocks.join('\n\n');
+      const filename = `MIV_Feed_Report_${uiState.reportTypeFilter}_${uiState.reportPeriod}_${new Date().toISOString().slice(0, 10)}.csv`;
 
       const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
       const url = URL.createObjectURL(blob);
@@ -2854,6 +3025,74 @@
         }
       }
       showSnackbar('CSV report downloaded!', 'success');
+    }
+
+    function printFilteredReportPdf() {
+      const records = getFilteredReportRecords();
+      if (records.length === 0) {
+        showSnackbar('No records to print for this filter', 'error');
+        return;
+      }
+
+      const tables = buildStructuredReportTables(records);
+      const grpName = uiState.reportGroupFilter === 'all'
+        ? 'All 4 Groups'
+        : (appState.groups.find(g => g.id === uiState.reportGroupFilter)?.name || '');
+      const houseName = uiState.reportHouseFilter === 'all'
+        ? 'All Houses'
+        : (appState.houses.find(h => h.id === uiState.reportHouseFilter)?.name || '');
+
+      const tablesHtml = tables.map(tbl => `
+        <h3 style="margin:22px 0 8px;font-size:13px;letter-spacing:0.04em;color:#1C3F2B;">${escapeHtml(tbl.title)}</h3>
+        <table style="width:100%;border-collapse:collapse;font-size:12px;">
+          <thead>
+            <tr style="background:#1C3F2B;color:#ffffff;">
+              ${tbl.headers.map(h => `<th style="border:1px solid #1C3F2B;padding:8px 10px;text-align:left;">${escapeHtml(h)}</th>`).join('')}
+            </tr>
+          </thead>
+          <tbody>
+            ${tbl.rows.map((row, i) => `
+              <tr style="background:${i % 2 === 0 ? '#ffffff' : '#f7f9f8'};">
+                ${row.map(cell => `<td style="border:1px solid #d4d8d0;padding:7px 10px;">${escapeHtml(cell)}</td>`).join('')}
+              </tr>
+            `).join('')}
+            <tr style="background:#e1ede6;font-weight:800;color:#0f2318;">
+              ${tbl.totalRow.map(cell => `<td style="border:1px solid #98c0ab;padding:9px 10px;">${escapeHtml(cell)}</td>`).join('')}
+            </tr>
+          </tbody>
+        </table>
+      `).join('');
+
+      const printWin = window.open('', '_blank', 'width=900,height=700');
+      if (!printWin) {
+        showSnackbar('Pop-up blocked — allow pop-ups to Print / PDF', 'error');
+        return;
+      }
+
+      printWin.document.write(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <title>MIV Farm Feed Report - ${escapeHtml(grpName)}</title>
+          <style>
+            body { font-family: Arial, sans-serif; color: #181C19; padding: 24px; }
+            @media print { body { padding: 0; } }
+          </style>
+        </head>
+        <body>
+          <div style="display:flex;justify-content:space-between;align-items:flex-end;border-bottom:2px solid #1C3F2B;padding-bottom:10px;">
+            <div>
+              <h2 style="margin:0;color:#1C3F2B;font-size:18px;">MIV Farm Daily Feeds Record</h2>
+              <p style="margin:4px 0 0;font-size:12px;color:#555D4F;">Group: <strong>${escapeHtml(grpName)}</strong> &bull; House: <strong>${escapeHtml(houseName)}</strong> &bull; Period: <strong>${escapeHtml(uiState.reportPeriod.toUpperCase())}</strong></p>
+            </div>
+            <div style="font-size:11px;color:#555D4F;">Printed: ${new Date().toLocaleString()}</div>
+          </div>
+          ${tablesHtml}
+          <script>window.onload = function() { window.print(); };<\/script>
+        </body>
+        </html>
+      `);
+      printWin.document.close();
     }
 
     function renderAdminSetupView() {
