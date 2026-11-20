@@ -583,342 +583,210 @@
       bagCount: 15,
       siloTons: 10,
       hopperSiloTons: 0,
+      draftDoNumber: '',
+      draftLorryNumber: '',
+      draftDatetime: '',
       adminSubTab: 'groups',
       reportPeriod: 'daily',
       reportGroupFilter: 'all',
       reportHouseFilter: 'all',
       reportTypeFilter: 'all',
-      reportDeliveryMode: 'silo',
+      reportDeliveryMode: 'bags',
       reportSearch: '',
       dropboxSyncing: false,
       dropboxError: null,
       adminUnlocked: false,
-      logsUnlocked: false
+      logsUnlocked: false,
+      pendingPinCallback: null
     };
 
-    let pendingPinCallback = null;
+    const IDB_DB_NAME = 'MivFarmFeedsDB';
+    const IDB_STORE_NAME = 'app_state_store';
+    let idbReadyPromise = null;
 
-    function requestPasswordVerification({ title, desc, expectedPassword, sessionFlagKey }, onSuccess) {
-      if (uiState[sessionFlagKey]) {
-        onSuccess();
-        return;
-      }
-      pendingPinCallback = {
-        expectedPassword: String(expectedPassword || '1234'),
-        sessionFlagKey,
-        onSuccess
-      };
-      document.getElementById('pin-modal-title').textContent = title || 'Password Required';
-      document.getElementById('pin-modal-desc').textContent = desc || 'Enter password to continue';
-      const input = document.getElementById('pin-modal-input');
-      input.value = '';
-      document.getElementById('pin-modal-error').classList.add('hidden');
-      document.getElementById('pin-modal').classList.remove('hidden');
-      lucide.createIcons();
-      setTimeout(() => input.focus(), 60);
-    }
-
-    function submitPinVerification(e) {
-      e.preventDefault();
-      if (!pendingPinCallback) return;
-      const entered = document.getElementById('pin-modal-input').value.trim();
-      if (entered === pendingPinCallback.expectedPassword) {
-        const { sessionFlagKey, onSuccess } = pendingPinCallback;
-        uiState[sessionFlagKey] = true;
-        closePinModal();
-        onSuccess();
-      } else {
-        document.getElementById('pin-modal-error').classList.remove('hidden');
-        const input = document.getElementById('pin-modal-input');
-        input.select();
-      }
-    }
-
-    function closePinModal() {
-      pendingPinCallback = null;
-      document.getElementById('pin-modal').classList.add('hidden');
-    }
-
-    // Read Dropbox config from URL hash (#miv=...) or query (?miv=...) so new devices never inherit an expired token
-    function extractConfigFromUrlHash() {
-      try {
-        const source = (window.location.hash || '') + '&' + (window.location.search || '');
-        const match = source.match(/miv=([A-Za-z0-9\-_]+)/);
-        if (!match) return null;
-        let b64 = match[1].replace(/-/g, '+').replace(/_/g, '/');
-        while (b64.length % 4) b64 += '=';
-        const jsonStr = decodeURIComponent(escape(atob(b64)));
-        return JSON.parse(jsonStr);
-      } catch (e) {
-        return null;
-      }
-    }
-
-    function buildSyncPayloadBase64(dbx) {
-      const hasPermanentRefresh = !!(dbx.refreshToken && dbx.appKey);
-      const payload = JSON.stringify({
-        // Omit short-lived accessToken when permanent refreshToken + appKey exist so new devices always mint a fresh token
-        t: hasPermanentRefresh ? '' : (dbx.accessToken || ''),
-        rt: dbx.refreshToken || '',
-        ak: dbx.appKey || '',
-        as: dbx.appSecret || '',
-        p: dbx.folderPath || '/MIV_Farm_Records/miv_farm_database.json'
+    function openAppIndexedDB() {
+      if (idbReadyPromise) return idbReadyPromise;
+      idbReadyPromise = new Promise((resolve) => {
+        if (!window.indexedDB) return resolve(null);
+        try {
+          const req = indexedDB.open(IDB_DB_NAME, 1);
+          req.onupgradeneeded = (e) => {
+            const db = e.target.result;
+            if (!db.objectStoreNames.contains(IDB_STORE_NAME)) {
+              db.createObjectStore(IDB_STORE_NAME);
+            }
+          };
+          req.onsuccess = (e) => resolve(e.target.result);
+          req.onerror = () => resolve(null);
+        } catch {
+          resolve(null);
+        }
       });
-      return btoa(unescape(encodeURIComponent(payload)))
-        .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+      return idbReadyPromise;
     }
 
-    function syncConfigToUrlHash(dbx) {
+    async function mirrorStateToIndexedDB(stateObj) {
+      const db = await openAppIndexedDB();
+      if (!db) return;
       try {
-        if (!dbx || (!dbx.accessToken && !dbx.refreshToken)) return;
-        const b64 = buildSyncPayloadBase64(dbx);
-        window.history.replaceState(null, '', '#miv=' + b64);
-      } catch (e) {
-        // Ignore if sandboxed history restricts replaceState
-      }
+        const tx = db.transaction(IDB_STORE_NAME, 'readwrite');
+        tx.objectStore(IDB_STORE_NAME).put(JSON.parse(JSON.stringify(stateObj)), STORAGE_KEY);
+      } catch (e) {}
     }
 
-    // IndexedDB fallback mirror for environments where localStorage is cleared on reload
-    function mirrorStateToIndexedDB(stateObj) {
-      try {
-        if (!window.indexedDB) return;
-        const req = indexedDB.open('MIV_Farm_IDB', 1);
-        req.onupgradeneeded = (ev) => {
-          const db = ev.target.result;
-          if (!db.objectStoreNames.contains('kv')) db.createObjectStore('kv');
-        };
-        req.onsuccess = (ev) => {
-          const db = ev.target.result;
-          const tx = db.transaction('kv', 'readwrite');
-          tx.objectStore('kv').put(JSON.stringify(stateObj), STORAGE_KEY);
-        };
-      } catch (e) {
-        // Ignore IDB restrictions
-      }
+    async function readStateFromIndexedDB() {
+      const db = await openAppIndexedDB();
+      if (!db) return null;
+      return new Promise((resolve) => {
+        try {
+          const tx = db.transaction(IDB_STORE_NAME, 'readonly');
+          const req = tx.objectStore(IDB_STORE_NAME).get(STORAGE_KEY);
+          req.onsuccess = () => resolve(req.result || null);
+          req.onerror = () => resolve(null);
+        } catch {
+          resolve(null);
+        }
+      });
     }
 
-    // Ensure every group has 1 STORE house, individual cycle settings, and standardized shift roles
-    function ensureGroupStoresAndWorkers(groupsList, housesList, existingWorkersList, fallbackCycle = null) {
-      const baseCycle = fallbackCycle || DEFAULT_STATE.cycle;
-      const normalizedGroups = (groupsList || []).map(g => ({
-        ...g,
-        cycleName: g.cycleName || baseCycle.name || 'Cycle 76',
-        cycleStartDate: g.cycleStartDate || baseCycle.startDate || new Date().toISOString().split('T')[0],
-        cycleDurationDays: parseInt(g.cycleDurationDays, 10) || parseInt(baseCycle.durationDays, 10) || 60
-      }));
+    function normalizeState(saved) {
+      if (!saved || typeof saved !== 'object') {
+        saved = {};
+      }
+      const base = JSON.parse(JSON.stringify(DEFAULT_STATE));
+      const mergedGroups = Array.isArray(saved.groups) && saved.groups.length ? saved.groups : base.groups;
+      const mergedHouses = Array.isArray(saved.houses) && saved.houses.length ? [...saved.houses] : [...base.houses];
 
-      const updatedHouses = Array.isArray(housesList) ? [...housesList] : [];
-      normalizedGroups.forEach(g => {
-        const hasStore = updatedHouses.some(h => h.groupId === g.id && (h.isStore || String(h.name).trim().toUpperCase() === 'STORE'));
+      mergedGroups.forEach(g => {
+        const hasStore = mergedHouses.some(h => h.groupId === g.id && (h.isStore || String(h.name).trim().toUpperCase() === 'STORE'));
         if (!hasStore) {
-          updatedHouses.unshift({
-            id: `h-${g.id}-store`,
-            name: 'STORE',
-            groupId: g.id,
-            isStore: true
-          });
+          mergedHouses.unshift({ id: `h-${g.id}-store`, name: 'STORE', groupId: g.id, isStore: true });
         }
       });
 
       const shiftTemplates = ['Morning Shift', 'Night Shift', 'Supervisor'];
+      const existingWorkers = Array.isArray(saved.workers) ? saved.workers : [];
       const standardizedWorkers = [];
-      updatedHouses.forEach(h => {
+      mergedHouses.forEach(h => {
         shiftTemplates.forEach((roleName, idx) => {
-          const match = (existingWorkersList || []).find(w => w.houseId === h.id && w.name === roleName);
-          standardizedWorkers.push(match || {
-            id: `w-${h.id}-${idx + 1}`,
-            name: roleName,
-            houseId: h.id
-          });
+          const match = existingWorkers.find(w => w.houseId === h.id && w.name === roleName);
+          standardizedWorkers.push(match || { id: `w-${h.id}-${idx + 1}`, name: roleName, houseId: h.id });
         });
       });
 
-      return { groups: normalizedGroups, houses: updatedHouses, workers: standardizedWorkers };
-    }
-
-    // Merge local and cloud states without losing offline records or Dropbox settings
-    function mergeStatesNonDestructive(localSt, cloudSt) {
-      if (!cloudSt || typeof cloudSt !== 'object') return localSt;
-      const mergedMap = new Map();
-      (Array.isArray(cloudSt.records) ? cloudSt.records : []).forEach(r => {
-        if (r && r.id) mergedMap.set(r.id, r);
-      });
-      (Array.isArray(localSt.records) ? localSt.records : []).forEach(r => {
-        if (r && r.id) {
-          const existing = mergedMap.get(r.id);
-          if (!existing || r._localDirty || (r.updatedAt && (!existing.updatedAt || r.updatedAt > existing.updatedAt))) {
-            mergedMap.set(r.id, r);
-          }
-        }
-      });
-      const mergedRecords = Array.from(mergedMap.values()).sort((a, b) => new Date(b.datetime) - new Date(a.datetime));
-
-      const rawGroups = Array.isArray(cloudSt.groups) && cloudSt.groups.length ? cloudSt.groups : localSt.groups;
-      const rawHouses = Array.isArray(cloudSt.houses) && cloudSt.houses.length ? cloudSt.houses : localSt.houses;
-      const existingWorkers = Array.isArray(cloudSt.workers) ? cloudSt.workers : localSt.workers;
-      const mergedCycle = cloudSt.cycle ? { ...localSt.cycle, ...cloudSt.cycle } : localSt.cycle;
-      const { groups: mergedGroups, houses: mergedHouses, workers: standardizedWorkers } = ensureGroupStoresAndWorkers(rawGroups, rawHouses, existingWorkers, mergedCycle);
-
       const sampleIds = new Set(['rec-101', 'rec-102', 'rec-103', 'rec-104', 'rec-105', 'rec-106', 'rec-107', 'rec-108']);
-      const cleanedRecords = mergedRecords.filter(r => !sampleIds.has(r.id));
-      const cleanedNotifications = (Array.isArray(cloudSt.notifications) ? cloudSt.notifications : (localSt.notifications || []))
-        .filter(n => n.id !== 'n1' && n.id !== 'n2');
+      const cleanedRecords = (Array.isArray(saved.records) ? saved.records : []).filter(r => !sampleIds.has(r.id));
+      const cleanedNotifications = (Array.isArray(saved.notifications) ? saved.notifications : []).filter(n => n.id !== 'n1' && n.id !== 'n2');
 
       return {
-        ...localSt,
-        cycle: mergedCycle,
-        security: cloudSt.security ? { ...localSt.security, ...cloudSt.security } : localSt.security,
+        ...base,
+        ...saved,
+        cycle: { ...base.cycle, ...(saved.cycle || {}) },
+        security: { ...base.security, ...(saved.security || {}) },
+        dropbox: { ...base.dropbox, ...(saved.dropbox || {}) },
         groups: mergedGroups,
         houses: mergedHouses,
-        feedTypes: Array.isArray(cloudSt.feedTypes) && cloudSt.feedTypes.length ? cloudSt.feedTypes : localSt.feedTypes,
+        feedTypes: Array.isArray(saved.feedTypes) && saved.feedTypes.length ? saved.feedTypes : base.feedTypes,
         workers: standardizedWorkers,
         records: cleanedRecords,
-        notifications: cleanedNotifications,
-        dropbox: { ...localSt.dropbox }
+        notifications: cleanedNotifications
       };
     }
 
-    // Load or initialize persistent state
     function loadState() {
-      const hashCfg = extractConfigFromUrlHash();
       let parsed = null;
       try {
         const raw = localStorage.getItem(STORAGE_KEY);
         if (raw) parsed = JSON.parse(raw);
-      } catch (e) {
-        console.warn('Could not read localStorage:', e);
-      }
+      } catch (e) {}
+      const state = normalizeState(parsed);
 
-      const base = JSON.parse(JSON.stringify(DEFAULT_STATE));
-      if (parsed) {
-        const effectiveCycle = { ...base.cycle, ...(parsed.cycle || {}) };
-        const rawGroups = Array.isArray(parsed.groups) && parsed.groups.length ? parsed.groups : base.groups;
-        const rawHouses = Array.isArray(parsed.houses) && parsed.houses.length ? parsed.houses : base.houses;
-        const existingWorkers = Array.isArray(parsed.workers) ? parsed.workers : [];
-        const { groups: mergedGroups, houses: mergedHouses, workers: standardizedWorkers } = ensureGroupStoresAndWorkers(rawGroups, rawHouses, existingWorkers, effectiveCycle);
-
-        const sampleIds = new Set(['rec-101', 'rec-102', 'rec-103', 'rec-104', 'rec-105', 'rec-106', 'rec-107', 'rec-108']);
-        const cleanedRecords = (Array.isArray(parsed.records) ? parsed.records : []).filter(r => !sampleIds.has(r.id));
-        const cleanedNotifications = (Array.isArray(parsed.notifications) ? parsed.notifications : [])
-          .filter(n => n.id !== 'n1' && n.id !== 'n2');
-
-        Object.assign(base, {
-          ...parsed,
-          security: { ...base.security, ...(parsed.security || {}) },
-          cycle: effectiveCycle,
-          dropbox: { ...base.dropbox, ...(parsed.dropbox || {}) },
-          groups: mergedGroups,
-          houses: mergedHouses,
-          feedTypes: Array.isArray(parsed.feedTypes) && parsed.feedTypes.length ? parsed.feedTypes : base.feedTypes,
-          workers: standardizedWorkers,
-          records: cleanedRecords,
-          notifications: cleanedNotifications
-        });
-      } else {
-        const initialized = ensureGroupStoresAndWorkers(base.groups, base.houses, [], base.cycle);
-        base.groups = initialized.groups;
-        base.houses = initialized.houses;
-        base.workers = initialized.workers;
-      }
-
-      if (hashCfg) {
-        if (hashCfg.rt) base.dropbox.refreshToken = hashCfg.rt;
-        if (hashCfg.ak) base.dropbox.appKey = hashCfg.ak;
-        if (hashCfg.as) base.dropbox.appSecret = hashCfg.as;
-        // When opened via 1-Tap Sync Link with a Permanent Refresh Token, force immediate fresh token minting
-        if (hashCfg.rt && hashCfg.ak) {
-          base.dropbox.accessToken = '';
-          base.dropbox.tokenExpiresAt = 0;
-        } else if (hashCfg.t) {
-          base.dropbox.accessToken = hashCfg.t;
+      // Parse 1-Tap Device Sync Hash (#miv=...) if present
+      try {
+        if (window.location.hash && window.location.hash.startsWith('#miv=')) {
+          const encoded = window.location.hash.slice(5);
+          const decoded = JSON.parse(decodeURIComponent(escape(atob(encoded))));
+          if (decoded && typeof decoded === 'object') {
+            if (decoded.refreshToken) {
+              state.dropbox.refreshToken = decoded.refreshToken;
+              state.dropbox.accessToken = '';
+              state.dropbox.tokenExpiresAt = 0;
+            } else if (decoded.accessToken) {
+              state.dropbox.accessToken = decoded.accessToken;
+            }
+            if (decoded.appKey) state.dropbox.appKey = decoded.appKey;
+            if (decoded.appSecret) state.dropbox.appSecret = decoded.appSecret;
+            if (decoded.folderPath) state.dropbox.folderPath = decoded.folderPath;
+            history.replaceState(null, '', window.location.pathname + window.location.search);
+          }
         }
-        if (hashCfg.p) base.dropbox.folderPath = hashCfg.p;
-        base.dropbox.autoSync = true;
-      }
+      } catch (e) {}
 
-      return base;
+      return state;
     }
 
     let appState = loadState();
 
-    // Recover from IndexedDB if localStorage was empty on boot, then pull directly from Dropbox
-    function hydrateDurableStateOnBoot() {
-      const hasToken = !!(appState.dropbox.accessToken || appState.dropbox.refreshToken);
-      try {
-        if (!window.indexedDB) {
-          if (hasToken) {
-            pullFromDropbox(true);
-          }
-          return;
-        }
-        const req = indexedDB.open('MIV_Farm_IDB', 1);
-        req.onupgradeneeded = (ev) => {
-          const db = ev.target.result;
-          if (!db.objectStoreNames.contains('kv')) db.createObjectStore('kv');
-        };
-        req.onsuccess = (ev) => {
-          const db = ev.target.result;
-          const tx = db.transaction('kv', 'readonly');
-          const getReq = tx.objectStore('kv').get(STORAGE_KEY);
-          getReq.onsuccess = () => {
-            if (getReq.result) {
-              try {
-                const idbParsed = JSON.parse(getReq.result);
-                if (idbParsed) {
-                  const hadTokenBefore = !!(appState.dropbox.accessToken || appState.dropbox.refreshToken);
-                  if (!appState.dropbox.accessToken && idbParsed.dropbox?.accessToken) {
-                    appState.dropbox.accessToken = idbParsed.dropbox.accessToken;
-                  }
-                  if (!appState.dropbox.refreshToken && idbParsed.dropbox?.refreshToken) {
-                    appState.dropbox.refreshToken = idbParsed.dropbox.refreshToken;
-                  }
-                  if (!appState.dropbox.appKey && idbParsed.dropbox?.appKey) {
-                    appState.dropbox.appKey = idbParsed.dropbox.appKey;
-                  }
-                  if (!appState.dropbox.appSecret && idbParsed.dropbox?.appSecret) {
-                    appState.dropbox.appSecret = idbParsed.dropbox.appSecret;
-                  }
-                  if (appState.records.length === 0 && Array.isArray(idbParsed.records) && idbParsed.records.length > 0) {
-                    appState = mergeStatesNonDestructive(appState, idbParsed);
-                    saveState(false);
-                    renderApp();
-                  }
-                  if (!hadTokenBefore && (appState.dropbox.accessToken || appState.dropbox.refreshToken)) {
-                    syncConfigToUrlHash(appState.dropbox);
-                    updateDropboxStatusPill();
-                  }
-                }
-              } catch (e) {}
-            }
-            // Auto pull directly from /MIV_Farm_Records/miv_farm_database.json whenever app opens
-            if (appState.dropbox.accessToken || appState.dropbox.refreshToken) {
-              pullFromDropbox(true);
-            }
-          };
-        };
-      } catch (e) {
-        if (hasToken) {
-          pullFromDropbox(true);
-        }
-      }
-    }
-
-    function saveState(triggerCloudSync = true) {
+    function saveState(triggerCloudSync = false) {
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(appState));
-      } catch (e) {
-        console.error('Failed to save state:', e);
-      }
+      } catch (e) {}
       mirrorStateToIndexedDB(appState);
-      if (appState.dropbox && (appState.dropbox.accessToken || appState.dropbox.refreshToken)) {
-        syncConfigToUrlHash(appState.dropbox);
-      }
       updateDropboxStatusPill();
       updateNotificationBadge();
-
       if (triggerCloudSync && appState.dropbox.autoSync && (appState.dropbox.accessToken || appState.dropbox.refreshToken)) {
         syncToDropbox(true);
       }
+    }
+
+    async function hydrateDurableStateOnBoot() {
+      try {
+        const idbSaved = await readStateFromIndexedDB();
+        if (idbSaved && Array.isArray(idbSaved.records) && appState.records.length === 0 && idbSaved.records.length > 0) {
+          appState = mergeStatesNonDestructive(appState, idbSaved);
+          saveState(false);
+          renderApp(true);
+        }
+      } catch (e) {}
+
+      if (appState.dropbox.accessToken || appState.dropbox.refreshToken) {
+        if (appState.records.some(r => r._localDirty)) {
+          await syncToDropbox(true);
+        }
+        await pullFromDropbox(true);
+      }
+    }
+
+    function mergeStatesNonDestructive(localState, remoteState) {
+      const merged = normalizeState({
+        ...localState,
+        ...remoteState,
+        dropbox: localState.dropbox,
+        security: remoteState.security || localState.security,
+        cycle: remoteState.cycle || localState.cycle,
+        groups: Array.isArray(remoteState.groups) && remoteState.groups.length ? remoteState.groups : localState.groups,
+        houses: Array.isArray(remoteState.houses) && remoteState.houses.length ? remoteState.houses : localState.houses,
+        feedTypes: Array.isArray(remoteState.feedTypes) && remoteState.feedTypes.length ? remoteState.feedTypes : localState.feedTypes
+      });
+
+      const recMap = new Map();
+      (Array.isArray(remoteState.records) ? remoteState.records : []).forEach(r => {
+        if (r && r.id) recMap.set(r.id, { ...r, _localDirty: false });
+      });
+      (Array.isArray(localState.records) ? localState.records : []).forEach(r => {
+        if (!r || !r.id) return;
+        const existing = recMap.get(r.id);
+        if (!existing || r._localDirty || new Date(r.updatedAt || r.datetime) > new Date(existing.updatedAt || existing.datetime)) {
+          recMap.set(r.id, r);
+        }
+      });
+
+      const sampleIds = new Set(['rec-101', 'rec-102', 'rec-103', 'rec-104', 'rec-105', 'rec-106', 'rec-107', 'rec-108']);
+      merged.records = Array.from(recMap.values())
+        .filter(r => !sampleIds.has(r.id))
+        .sort((a, b) => new Date(b.datetime) - new Date(a.datetime));
+
+      return normalizeState(merged);
     }
 
     // =========================================================================
@@ -926,42 +794,31 @@
     // =========================================================================
     function getCurrentLocalDateTimeInput() {
       const now = new Date();
-      now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
-      return now.toISOString().slice(0, 16);
+      const offsetMs = now.getTimezoneOffset() * 60000;
+      return new Date(now.getTime() - offsetMs).toISOString().slice(0, 16);
     }
 
-    function formatDisplayDateTime(isoStr) {
-      if (!isoStr) return '';
-      const d = new Date(isoStr);
-      if (isNaN(d.getTime())) return isoStr;
-      return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }) + ' • ' +
-             d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+    function formatDisplayDateTime(dtStr) {
+      if (!dtStr) return '';
+      const d = new Date(dtStr);
+      if (isNaN(d.getTime())) return dtStr;
+      return d.toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
     }
 
-    function formatShortDate(isoStr) {
-      if (!isoStr) return '';
-      const d = new Date(isoStr);
-      if (isNaN(d.getTime())) return isoStr;
+    function formatShortDate(dtStr) {
+      if (!dtStr) return '';
+      const d = new Date(dtStr);
+      if (isNaN(d.getTime())) return dtStr;
       return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
     }
 
-    function getGroupCycleConfig(groupId = null) {
+    function getGroupCycleConfig(groupId) {
       const grp = groupId ? appState.groups.find(g => g.id === groupId) : null;
       return {
-        name: (grp && grp.cycleName) ? grp.cycleName : (appState.cycle.name || 'Cycle 76'),
-        startDate: (grp && grp.cycleStartDate) ? grp.cycleStartDate : (appState.cycle.startDate || new Date().toISOString().split('T')[0]),
-        durationDays: (grp && grp.cycleDurationDays) ? (parseInt(grp.cycleDurationDays, 10) || 60) : (parseInt(appState.cycle.durationDays, 10) || 60)
+        name: grp?.cycleName || appState.cycle.name || 'Cycle 76',
+        startDate: grp?.cycleStartDate || appState.cycle.startDate || new Date().toISOString().slice(0, 10),
+        durationDays: Number(grp?.cycleDurationDays || appState.cycle.durationDays) || 60
       };
-    }
-
-    function getCycleDayInfo(groupId = null) {
-      const cfg = getGroupCycleConfig(groupId);
-      const start = new Date(cfg.startDate + 'T00:00:00');
-      const now = new Date();
-      const diffMs = now - start;
-      const dayNum = Math.max(1, Math.min(cfg.durationDays, Math.floor(diffMs / 86400000) + 1));
-      const pct = Math.min(100, Math.round((dayNum / cfg.durationDays) * 100));
-      return { dayNum, totalDays: cfg.durationDays, pct, name: cfg.name, startDate: cfg.startDate };
     }
 
     function getCycleWindowDates(groupId = null) {
@@ -971,39 +828,38 @@
       return { start, end };
     }
 
+    function getCycleDayInfo(groupId = null) {
+      const cfg = getGroupCycleConfig(groupId);
+      const { start } = getCycleWindowDates(groupId);
+      const now = new Date();
+      const diffDays = Math.floor((now - start) / 86400000) + 1;
+      const totalDays = cfg.durationDays;
+      const dayNum = Math.max(1, Math.min(totalDays, diffDays));
+      const pct = Math.min(100, Math.max(2, Math.round((dayNum / totalDays) * 100)));
+      return { name: cfg.name, dayNum, totalDays, pct };
+    }
+
     function getCycleRecords(groupId = null) {
-      if (groupId) {
-        const { start, end } = getCycleWindowDates(groupId);
-        return appState.records.filter(r => {
-          if (r.groupId !== groupId) return false;
-          const d = new Date(r.datetime);
-          return d >= start && d <= end;
-        });
-      }
       return appState.records.filter(r => {
+        if (groupId && r.groupId !== groupId) return false;
         const { start, end } = getCycleWindowDates(r.groupId);
         const d = new Date(r.datetime);
         return d >= start && d <= end;
       });
     }
 
-    function calculateGroupMetrics(groupId, customRecords = null) {
-      const source = customRecords || getCycleRecords();
-      const groupRecords = source.filter(r => r.groupId === groupId);
-
+    function calculateGroupMetrics(groupId, recordsSubset = appState.records) {
       let totalInputBags = 0;
       let totalOutputBags = 0;
       const byFeedType = {};
-
       appState.feedTypes.forEach(ft => {
         byFeedType[ft.id] = { input: 0, output: 0, balance: 0 };
       });
 
-      groupRecords.forEach(r => {
+      recordsSubset.forEach(r => {
+        if (r.groupId !== groupId) return;
         const bags = Number(r.bags) || 0;
-        if (!byFeedType[r.feedTypeId]) {
-          byFeedType[r.feedTypeId] = { input: 0, output: 0, balance: 0 };
-        }
+        if (!byFeedType[r.feedTypeId]) byFeedType[r.feedTypeId] = { input: 0, output: 0, balance: 0 };
         if (r.entryType === 'input') {
           totalInputBags += bags;
           byFeedType[r.feedTypeId].input += bags;
@@ -1021,340 +877,131 @@
         totalInputBags,
         totalOutputBags,
         balanceBags: totalInputBags - totalOutputBags,
-        totalInputKg: totalInputBags * 50,
-        totalOutputKg: totalOutputBags * 50,
-        byFeedType,
-        recordCount: groupRecords.length
+        byFeedType
       };
     }
 
-    function calculateHouseMetrics(houseId, customRecords = null) {
-      const source = customRecords || getCycleRecords();
-      const houseObj = appState.houses.find(h => h.id === houseId);
-      const isStore = houseObj && (houseObj.isStore || String(houseObj.name).trim().toUpperCase() === 'STORE');
-
-      if (isStore && houseObj) {
-        // Store receives all group deliveries (bag & silo) and deducts all hopper bags consumed across the group
-        const groupRecords = source.filter(r => r.groupId === houseObj.groupId);
-        let storeStockIn = 0;
-        let groupHopperOut = 0;
-        let directStoreOut = 0;
-        groupRecords.forEach(r => {
-          const bags = Number(r.bags) || 0;
-          if (r.entryType === 'input') {
-            storeStockIn += bags;
-          } else {
-            groupHopperOut += bags;
-            if (r.houseId === houseId) directStoreOut += bags;
-          }
-        });
-        return {
-          isStore: true,
-          inputBags: storeStockIn,
-          outputBags: directStoreOut,
-          totalDeductedBags: groupHopperOut,
-          balanceBags: storeStockIn - groupHopperOut,
-          outputKg: directStoreOut * 50
-        };
-      }
-
-      // Regular houses only record Hopper Bags Consumed (deducted from group Store)
-      const houseRecords = source.filter(r => r.houseId === houseId && r.entryType !== 'input');
+    function calculateHouseMetrics(houseId, recordsSubset = appState.records) {
+      const house = appState.houses.find(h => h.id === houseId);
+      const isStore = Boolean(house && (house.isStore || String(house.name).trim().toUpperCase() === 'STORE'));
+      let inputBags = 0;
       let outputBags = 0;
-      houseRecords.forEach(r => {
-        outputBags += Number(r.bags) || 0;
+      let totalDeductedBags = 0;
+
+      recordsSubset.forEach(r => {
+        const bags = Number(r.bags) || 0;
+        if (isStore && house) {
+          if (r.groupId === house.groupId) {
+            if (r.entryType === 'input') inputBags += bags;
+            else totalDeductedBags += bags;
+          }
+        } else if (r.houseId === houseId) {
+          if (r.entryType === 'input') inputBags += bags;
+          else outputBags += bags;
+        }
       });
+
+      const balanceBags = isStore ? (inputBags - totalDeductedBags) : (inputBags - outputBags);
       return {
-        isStore: false,
-        inputBags: 0,
+        isStore,
+        inputBags,
         outputBags,
-        balanceBags: 0,
-        outputKg: outputBags * 50
+        outputKg: outputBags * 50,
+        totalDeductedBags,
+        balanceBags
       };
     }
 
     // =========================================================================
-    // 3. DROPBOX CONTENT API v2 INTEGRATION (PKCE + REFRESH TOKEN + AUTO PULL)
+    // 3. DROPBOX CONTENT API v2 + OAUTH2 REFRESH TOKEN ENGINE
     // =========================================================================
+    function getNormalizedDropboxFilePath() {
+      let raw = (appState.dropbox.folderPath || '/MIV_Farm_Records/miv_farm_database.json').trim();
+      if (!raw.startsWith('/')) raw = '/' + raw;
+      if (!raw.toLowerCase().endsWith('.json')) {
+        raw = raw.replace(/\/+$/, '') + '/miv_farm_database.json';
+      }
+      return raw;
+    }
+
     async function fetchWithRetry(url, options, maxRetries = 3) {
       let lastErr = null;
-      for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      for (let attempt = 0; attempt < maxRetries; attempt++) {
         try {
           const res = await fetch(url, options);
-          if (res.status === 429 || (res.status >= 500 && res.status <= 599)) {
-            if (attempt < maxRetries) {
-              await new Promise(r => setTimeout(r, Math.pow(2, attempt) * 600));
-              continue;
-            }
+          if (res.status === 429 || res.status >= 500) {
+            await new Promise(r => setTimeout(r, 400 * Math.pow(2, attempt)));
+            continue;
           }
           return res;
         } catch (err) {
           lastErr = err;
-          if (attempt < maxRetries) {
-            await new Promise(r => setTimeout(r, Math.pow(2, attempt) * 600));
-          }
+          await new Promise(r => setTimeout(r, 400 * Math.pow(2, attempt)));
         }
       }
       throw lastErr || new Error('Network request failed');
     }
 
     async function ensureValidDropboxAccessToken(forceRefresh = false) {
-      const dbx = appState.dropbox || {};
-      const now = Date.now();
-      if (!forceRefresh && dbx.accessToken && (!dbx.refreshToken || (dbx.tokenExpiresAt && now < dbx.tokenExpiresAt - 60000))) {
-        return dbx.accessToken;
-      }
-      if (!dbx.refreshToken || !dbx.appKey) {
-        return dbx.accessToken || '';
-      }
-      try {
-        const params = new URLSearchParams();
-        params.append('grant_type', 'refresh_token');
-        params.append('refresh_token', dbx.refreshToken.trim());
-        params.append('client_id', dbx.appKey.trim());
+      const dbx = appState.dropbox;
+      if (dbx.refreshToken && dbx.appKey) {
+        const now = Date.now();
+        if (!forceRefresh && dbx.accessToken && dbx.tokenExpiresAt && now < dbx.tokenExpiresAt - 60000) {
+          return dbx.accessToken;
+        }
+        const params = new URLSearchParams({
+          grant_type: 'refresh_token',
+          refresh_token: dbx.refreshToken.trim(),
+          client_id: dbx.appKey.trim()
+        });
         if (dbx.appSecret && dbx.appSecret.trim()) {
           params.append('client_secret', dbx.appSecret.trim());
         }
-
         const res = await fetchWithRetry('https://api.dropboxapi.com/oauth2/token', {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           body: params.toString()
-        });
-        const text = await res.text();
+        }, 2);
         if (!res.ok) {
-          uiState.dropboxError = formatDropboxApiError(res.status, text);
-          renderDropboxErrorBox();
-          return forceRefresh ? '' : (dbx.accessToken || '');
+          const errText = await res.text();
+          throw new Error(`HTTP ${res.status} • OAUTH_REFRESH_FAILED: ${errText}`);
         }
-        const data = JSON.parse(text);
-        if (data.access_token) {
-          appState.dropbox.accessToken = data.access_token;
-          appState.dropbox.tokenExpiresAt = Date.now() + ((data.expires_in || 14400) * 1000);
-          uiState.dropboxError = null;
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(appState));
-          mirrorStateToIndexedDB(appState);
-          syncConfigToUrlHash(appState.dropbox);
-          return data.access_token;
-        }
-      } catch (e) {
-        console.warn('Refresh token exchange failed:', e);
-      }
-      return forceRefresh ? '' : (dbx.accessToken || '');
-    }
-
-    function generatePkceVerifier() {
-      const arr = new Uint8Array(48);
-      crypto.getRandomValues(arr);
-      return btoa(String.fromCharCode(...arr)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-    }
-
-    async function generatePkceChallenge(verifier) {
-      const data = new TextEncoder().encode(verifier);
-      const digest = await crypto.subtle.digest('SHA-256', data);
-      return btoa(String.fromCharCode(...new Uint8Array(digest))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-    }
-
-    async function startDropboxOAuthFlow() {
-      const appKey = document.getElementById('dbx-app-key-input').value.trim();
-      if (!appKey) {
-        showSnackbar('Enter your Dropbox App Key first', 'error');
-        return;
-      }
-      appState.dropbox.appKey = appKey;
-      const verifier = generatePkceVerifier();
-      sessionStorage.setItem('miv_dbx_pkce_verifier', verifier);
-      const challenge = await generatePkceChallenge(verifier);
-      const authUrl = `https://www.dropbox.com/oauth2/authorize?client_id=${encodeURIComponent(appKey)}&response_type=code&token_access_type=offline&code_challenge=${encodeURIComponent(challenge)}&code_challenge_method=S256`;
-      document.getElementById('dbx-oauth-code-box').classList.remove('hidden');
-      window.open(authUrl, '_blank', 'noopener,noreferrer');
-    }
-
-    async function exchangeDropboxAuthCode() {
-      const code = document.getElementById('dbx-auth-code-input').value.trim();
-      const appKey = document.getElementById('dbx-app-key-input').value.trim() || appState.dropbox.appKey;
-      const appSecret = document.getElementById('dbx-app-secret-input').value.trim() || appState.dropbox.appSecret;
-      const verifier = sessionStorage.getItem('miv_dbx_pkce_verifier') || '';
-
-      if (!code || !appKey) {
-        showSnackbar('Enter App Key and Authorization Code', 'error');
-        return;
-      }
-      try {
-        const params = new URLSearchParams();
-        params.append('code', code);
-        params.append('grant_type', 'authorization_code');
-        params.append('client_id', appKey);
-        if (verifier) params.append('code_verifier', verifier);
-        if (appSecret) params.append('client_secret', appSecret);
-
-        const res = await fetch('https://api.dropboxapi.com/oauth2/token', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: params.toString()
-        });
-        const text = await res.text();
-        if (!res.ok) {
-          uiState.dropboxError = formatDropboxApiError(res.status, text);
-          renderDropboxErrorBox();
-          showSnackbar('Code exchange failed: ' + uiState.dropboxError.code, 'error');
-          return;
-        }
-        const data = JSON.parse(text);
-        appState.dropbox.appKey = appKey;
-        if (appSecret) appState.dropbox.appSecret = appSecret;
-        if (data.refresh_token) {
-          appState.dropbox.refreshToken = data.refresh_token;
-          document.getElementById('dbx-refresh-token-input').value = data.refresh_token;
-        }
-        if (data.access_token) {
-          appState.dropbox.accessToken = data.access_token;
-          appState.dropbox.tokenExpiresAt = Date.now() + ((data.expires_in || 14400) * 1000);
-          document.getElementById('dbx-token-input').value = data.access_token;
-        }
-        uiState.dropboxError = null;
-        document.getElementById('dbx-oauth-code-box').classList.add('hidden');
+        const tokData = await res.json();
+        dbx.accessToken = tokData.access_token;
+        dbx.tokenExpiresAt = Date.now() + ((tokData.expires_in || 14400) * 1000);
         saveState(false);
-        renderDropboxErrorBox();
-        showSnackbar('Permanent Refresh Token connected!', 'success');
-      } catch (e) {
-        showSnackbar('Network error exchanging code', 'error');
+        return dbx.accessToken;
       }
+      return (dbx.accessToken || '').trim();
     }
 
-    function toggleTokenVisibility() {
-      const inp = document.getElementById('dbx-token-input');
-      const btn = document.getElementById('dbx-toggle-vis-btn');
-      if (!inp) return;
-      const isHidden = inp.type === 'password';
-      inp.type = isHidden ? 'text' : 'password';
-      if (btn) btn.querySelector('span').textContent = isHidden ? 'Hide' : 'Show';
-    }
-
-    function formatDropboxApiError(status, rawText) {
-      let summary = '';
+    async function parseDropboxHttpError(response) {
+      let detail = '';
       try {
-        const parsed = JSON.parse(rawText);
-        summary = parsed.error_summary || parsed.error_description || (parsed.error && parsed.error['.tag']) || rawText;
-      } catch (e) {
-        summary = rawText || 'Unknown error';
-      }
-      const cleanSummary = String(summary).trim();
-
-      if (status === 401 || cleanSummary.includes('expired_access_token') || cleanSummary.includes('invalid_access_token')) {
-        return {
-          code: `HTTP ${status || 401} • TOKEN_EXPIRED`,
-          message: 'Your Dropbox access token has expired or is invalid. Generate a Permanent Refresh Token above (or paste a fresh token).'
-        };
-      }
-      if (cleanSummary.includes('missing_scope')) {
-        return {
-          code: `HTTP ${status || 400} • MISSING_SCOPE`,
-          message: 'Enable "files.content.write" and "files.content.read" under Permissions in Dropbox App Console, then regenerate your token.'
-        };
-      }
-      if (cleanSummary.includes('invalid_grant')) {
-        return {
-          code: `HTTP ${status || 400} • INVALID_GRANT`,
-          message: 'Refresh token or authorization code is invalid or revoked. Click "Generate Permanent Token via App Key" to reconnect.'
-        };
-      }
-      if (status === 429) {
-        return {
-          code: 'HTTP 429 • RATE_LIMIT',
-          message: 'Dropbox API rate limit reached. Automatic retry is queued.'
-        };
-      }
-      if (!status) {
-        return {
-          code: 'NETWORK / CORS',
-          message: 'Could not reach api.dropboxapi.com. Check your internet connection or browser network shield.'
-        };
-      }
-      return {
-        code: `HTTP ${status}`,
-        message: cleanSummary.slice(0, 220)
-      };
-    }
-
-    function renderDropboxErrorBox() {
-      const box = document.getElementById('dbx-error-box');
-      const summaryEl = document.getElementById('dbx-status-summary-text');
-      const detailRow = document.getElementById('dbx-error-detail-row');
-      const codeEl = document.getElementById('dbx-error-code');
-      const msgEl = document.getElementById('dbx-error-message');
-      if (!box) return;
-
-      const hasCreds = !!(appState.dropbox.accessToken || appState.dropbox.refreshToken);
-
-      if (uiState.dropboxError) {
-        box.className = 'bg-red-50 border border-red-200 rounded-2xl px-3.5 py-2.5 text-xs text-red-900';
-        if (summaryEl) summaryEl.textContent = 'Cloud sync requires attention.';
-        if (detailRow) detailRow.classList.remove('hidden');
-        if (codeEl) codeEl.textContent = uiState.dropboxError.code || 'ERROR';
-        if (msgEl) msgEl.textContent = uiState.dropboxError.message || 'Sync failed.';
-      } else {
-        box.className = 'bg-farm-50 border border-farm-200 rounded-2xl px-3.5 py-2.5 text-xs text-farm-900';
-        if (detailRow) detailRow.classList.add('hidden');
-        if (summaryEl) {
-          summaryEl.textContent = hasCreds
-            ? 'Cloud sync active. Multi-device auto-hydration enabled.'
-            : 'Local cache active. Enter token to enable cloud sync.';
+        const txt = await response.text();
+        try {
+          const j = JSON.parse(txt);
+          detail = j.error_summary || j.error_description || txt;
+        } catch {
+          detail = txt;
         }
+      } catch {
+        detail = response.statusText || 'Unknown error';
       }
-    }
-
-    async function testDropboxConnection() {
-      let token = await ensureValidDropboxAccessToken(!!(appState.dropbox.refreshToken && appState.dropbox.appKey));
-      if (!token) {
-        showSnackbar('Enter a token or Refresh Token first', 'error');
-        return;
-      }
-      try {
-        let res = await fetchWithRetry('https://api.dropboxapi.com/2/users/get_current_account', {
-          method: 'POST',
-          headers: { 'Authorization': 'Bearer ' + token }
-        });
-        if (res.status === 401 && appState.dropbox.refreshToken && appState.dropbox.appKey) {
-          token = await ensureValidDropboxAccessToken(true);
-          if (token) {
-            res = await fetchWithRetry('https://api.dropboxapi.com/2/users/get_current_account', {
-              method: 'POST',
-              headers: { 'Authorization': 'Bearer ' + token }
-            });
-          }
-        }
-        const text = await res.text();
-        if (!res.ok) {
-          uiState.dropboxError = formatDropboxApiError(res.status, text);
-          renderDropboxErrorBox();
-          updateDropboxStatusPill();
-          showSnackbar('Dropbox check failed: ' + uiState.dropboxError.code, 'error');
-          return;
-        }
-        const acct = JSON.parse(text);
-        uiState.dropboxError = null;
-        renderDropboxErrorBox();
-        updateDropboxStatusPill();
-        showSnackbar(`Connected: ${acct.name?.display_name || 'Dropbox Account'}`, 'success');
-      } catch (err) {
-        uiState.dropboxError = formatDropboxApiError(0, err.message);
-        renderDropboxErrorBox();
-        showSnackbar('Network error testing Dropbox API', 'error');
-      }
+      const code = response.status === 401 ? 'HTTP 401 • TOKEN_EXPIRED' : `HTTP ${response.status} • API_ERROR`;
+      return { code, message: detail || 'Dropbox rejected the request.' };
     }
 
     function updateDropboxStatusPill() {
       const dot = document.getElementById('dropbox-dot');
       const txt = document.getElementById('dropbox-status-text');
       if (!dot || !txt) return;
-
-      const hasCreds = !!(appState.dropbox.accessToken || appState.dropbox.refreshToken);
+      const hasCreds = Boolean(appState.dropbox.accessToken || appState.dropbox.refreshToken);
       if (uiState.dropboxSyncing) {
-        dot.className = 'w-2 h-2 rounded-full bg-blue-400 animate-ping';
+        dot.className = 'w-2 h-2 rounded-full bg-sky-400 animate-pulse';
         txt.textContent = 'Syncing...';
-      } else if (uiState.dropboxError && hasCreds) {
-        dot.className = 'w-2 h-2 rounded-full bg-rose-400';
+      } else if (uiState.dropboxError) {
+        dot.className = 'w-2 h-2 rounded-full bg-red-400';
         txt.textContent = 'Sync Retry';
       } else if (hasCreds) {
         dot.className = 'w-2 h-2 rounded-full bg-emerald-400';
@@ -1365,95 +1012,100 @@
       }
     }
 
-    function resolveDropboxDatabaseFilePath() {
-      let raw = (appState.dropbox.folderPath || '/MIV_Farm_Records/miv_farm_database.json').trim();
-      if (!raw.startsWith('/')) raw = '/' + raw;
-      raw = raw.replace(/\/+$/, '');
-      if (raw.toLowerCase().endsWith('.json')) return raw;
-      return `${raw}/miv_farm_database.json`;
-    }
+    function renderDropboxErrorBox() {
+      const box = document.getElementById('dbx-error-box');
+      const summary = document.getElementById('dbx-status-summary-text');
+      const detailRow = document.getElementById('dbx-error-detail-row');
+      const codeEl = document.getElementById('dbx-error-code');
+      const msgEl = document.getElementById('dbx-error-message');
+      const lastSyncEl = document.getElementById('dbx-last-sync');
+      if (!box) return;
 
-    function resolveDropboxFolderBase() {
-      const dbPath = resolveDropboxDatabaseFilePath();
-      const idx = dbPath.lastIndexOf('/');
-      return idx > 0 ? dbPath.slice(0, idx) : '/MIV_Farm_Records';
+      if (lastSyncEl) {
+        lastSyncEl.textContent = appState.dropbox.lastSync ? formatDisplayDateTime(appState.dropbox.lastSync) : 'Never';
+      }
+
+      if (uiState.dropboxError) {
+        box.className = 'bg-red-50 border border-red-200 rounded-2xl px-3.5 py-2.5 text-xs text-red-900';
+        if (summary) summary.textContent = 'Cloud sync requires attention.';
+        if (detailRow) detailRow.classList.remove('hidden');
+        if (codeEl) codeEl.textContent = uiState.dropboxError.code || 'ERROR';
+        if (msgEl) msgEl.textContent = uiState.dropboxError.message || '';
+      } else if (appState.dropbox.accessToken || appState.dropbox.refreshToken) {
+        box.className = 'bg-emerald-50 border border-emerald-200 rounded-2xl px-3.5 py-2.5 text-xs text-emerald-900';
+        if (summary) summary.textContent = appState.dropbox.refreshToken
+          ? 'Permanent Refresh Token active (Auto-renews).'
+          : 'Dropbox Access Token active.';
+        if (detailRow) detailRow.classList.add('hidden');
+      } else {
+        box.className = 'bg-farm-50 border border-farm-200 rounded-2xl px-3.5 py-2.5 text-xs text-farm-900';
+        if (summary) summary.textContent = 'Local cache active. Enter token to enable cloud sync.';
+        if (detailRow) detailRow.classList.add('hidden');
+      }
     }
 
     async function syncToDropbox(silent = false) {
-      if (uiState.dropboxSyncing) return;
-      let token = await ensureValidDropboxAccessToken();
-      if (!token) {
-        if (!silent) showSnackbar('Please enter a Dropbox Access Token first', 'error');
-        return;
-      }
-
+      if (!appState.dropbox.accessToken && !appState.dropbox.refreshToken) return false;
       uiState.dropboxSyncing = true;
       updateDropboxStatusPill();
 
-      const filePath = resolveDropboxDatabaseFilePath();
-      const payload = JSON.stringify({
-        app: 'MIV Farm Daily Feeds Record',
-        exportedAt: new Date().toISOString(),
-        cycle: appState.cycle,
-        groups: appState.groups,
-        houses: appState.houses,
-        feedTypes: appState.feedTypes,
-        workers: appState.workers,
-        records: appState.records
-      }, null, 2);
-
-      const performUpload = (authToken) => fetchWithRetry('https://content.dropboxapi.com/2/files/upload', {
-        method: 'POST',
-        headers: {
-          'Authorization': 'Bearer ' + authToken,
-          'Dropbox-API-Arg': JSON.stringify({
-            path: filePath,
-            mode: 'overwrite',
-            autorename: false,
-            mute: true
-          }),
-          'Content-Type': 'application/octet-stream'
-        },
-        body: payload
-      });
-
       try {
-        let response = await performUpload(token);
-
-        // If 401 occurs and a Refresh Token exists, mint a fresh access token and retry immediately
-        if (response.status === 401 && appState.dropbox.refreshToken && appState.dropbox.appKey) {
-          appState.dropbox.tokenExpiresAt = 0;
-          const freshToken = await ensureValidDropboxAccessToken(true);
-          if (freshToken) {
-            response = await performUpload(freshToken);
+        let token = await ensureValidDropboxAccessToken(false);
+        const filePath = getNormalizedDropboxFilePath();
+        const payload = JSON.stringify({
+          ...appState,
+          records: appState.records.map(r => {
+            const copy = { ...r };
+            delete copy._localDirty;
+            return copy;
+          }),
+          dropbox: {
+            folderPath: appState.dropbox.folderPath,
+            autoSync: appState.dropbox.autoSync,
+            lastSync: new Date().toISOString()
           }
+        }, null, 2);
+
+        const doUpload = (tok) => fetchWithRetry('https://content.dropboxapi.com/2/files/upload', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${tok}`,
+            'Dropbox-API-Arg': JSON.stringify({
+              path: filePath,
+              mode: 'overwrite',
+              autorename: false,
+              mute: true
+            }),
+            'Content-Type': 'application/octet-stream'
+          },
+          body: payload
+        });
+
+        let response = await doUpload(token);
+        if (response.status === 401 && appState.dropbox.refreshToken && appState.dropbox.appKey) {
+          token = await ensureValidDropboxAccessToken(true);
+          response = await doUpload(token);
         }
 
-        const errText = await response.text();
         if (!response.ok) {
-          uiState.dropboxError = formatDropboxApiError(response.status, errText);
+          uiState.dropboxError = await parseDropboxHttpError(response);
           renderDropboxErrorBox();
-          throw new Error(uiState.dropboxError.message);
+          if (!silent) showSnackbar('Dropbox sync failed — check settings', 'error');
+          return false;
         }
 
-        uiState.dropboxError = null;
         appState.records.forEach(r => { delete r._localDirty; });
         appState.dropbox.lastSync = new Date().toISOString();
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(appState));
-        mirrorStateToIndexedDB(appState);
-
-        const lastSyncEl = document.getElementById('dbx-last-sync');
-        if (lastSyncEl) lastSyncEl.textContent = formatDisplayDateTime(appState.dropbox.lastSync);
+        uiState.dropboxError = null;
+        saveState(false);
         renderDropboxErrorBox();
-
         if (!silent) showSnackbar('Synced to Dropbox successfully!', 'success');
+        return true;
       } catch (err) {
-        console.warn('Dropbox upload error:', err);
-        if (!uiState.dropboxError) {
-          uiState.dropboxError = formatDropboxApiError(0, err.message);
-          renderDropboxErrorBox();
-        }
-        if (!silent) showSnackbar('Dropbox sync failed — saved locally', 'error');
+        uiState.dropboxError = { code: 'NETWORK / AUTH', message: err.message || 'Could not reach Dropbox.' };
+        renderDropboxErrorBox();
+        if (!silent) showSnackbar('Dropbox sync error', 'error');
+        return false;
       } finally {
         uiState.dropboxSyncing = false;
         updateDropboxStatusPill();
@@ -1461,67 +1113,77 @@
     }
 
     async function pullFromDropbox(silent = false) {
-      let token = await ensureValidDropboxAccessToken();
-      if (!token) {
-        if (!silent) showSnackbar('Enter Dropbox Access Token first', 'error');
-        return;
+      if (!appState.dropbox.accessToken && !appState.dropbox.refreshToken) {
+        if (!silent) showSnackbar('Enter a Dropbox token first', 'error');
+        return false;
       }
-
       uiState.dropboxSyncing = true;
       updateDropboxStatusPill();
 
-      const filePath = resolveDropboxDatabaseFilePath();
-      const performDownload = (authToken) => fetchWithRetry('https://content.dropboxapi.com/2/files/download', {
-        method: 'POST',
-        headers: {
-          'Authorization': 'Bearer ' + authToken,
-          'Dropbox-API-Arg': JSON.stringify({ path: filePath })
-        }
-      });
-
       try {
-        let response = await performDownload(token);
+        let token = await ensureValidDropboxAccessToken(false);
+        const filePath = getNormalizedDropboxFilePath();
 
-        // Automatically mint a fresh token via Refresh Token and retry if 401 occurs on new device
-        if (response.status === 401 && appState.dropbox.refreshToken && appState.dropbox.appKey) {
-          appState.dropbox.tokenExpiresAt = 0;
-          const freshToken = await ensureValidDropboxAccessToken(true);
-          if (freshToken) {
-            response = await performDownload(freshToken);
+        const doDownload = (tok) => fetchWithRetry('https://content.dropboxapi.com/2/files/download', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${tok}`,
+            'Dropbox-API-Arg': JSON.stringify({ path: filePath })
           }
+        });
+
+        let response = await doDownload(token);
+        if (response.status === 401 && appState.dropbox.refreshToken && appState.dropbox.appKey) {
+          token = await ensureValidDropboxAccessToken(true);
+          response = await doDownload(token);
         }
 
         if (!response.ok) {
-          const errText = await response.text();
-          // If file does not exist yet on Dropbox (path/not_found), seed it from local state
-          if (response.status === 409 && errText.includes('not_found')) {
+          if (response.status === 409) {
+            // File does not exist yet on Dropbox; seed it from local state
             uiState.dropboxSyncing = false;
-            uiState.dropboxError = null;
-            await syncToDropbox(silent);
-            return;
+            return await syncToDropbox(silent);
           }
-          uiState.dropboxError = formatDropboxApiError(response.status, errText);
+          uiState.dropboxError = await parseDropboxHttpError(response);
           renderDropboxErrorBox();
-          throw new Error(uiState.dropboxError.message);
+          if (!silent) showSnackbar('Dropbox pull failed', 'error');
+          return false;
         }
 
         const cloudData = await response.json();
         uiState.dropboxError = null;
         if (cloudData) {
+          const prevFingerprint = JSON.stringify({
+            records: appState.records,
+            groups: appState.groups,
+            houses: appState.houses,
+            feedTypes: appState.feedTypes,
+            cycle: appState.cycle
+          });
           appState = mergeStatesNonDestructive(appState, cloudData);
           appState.dropbox.lastSync = new Date().toISOString();
           saveState(false);
-          renderApp();
+          const nextFingerprint = JSON.stringify({
+            records: appState.records,
+            groups: appState.groups,
+            houses: appState.houses,
+            feedTypes: appState.feedTypes,
+            cycle: appState.cycle
+          });
+          const activeTag = document.activeElement?.tagName;
+          const isActivelyTyping = activeTag === 'INPUT' || activeTag === 'TEXTAREA' || activeTag === 'SELECT';
+          if (prevFingerprint !== nextFingerprint && !isActivelyTyping) {
+            renderApp(true);
+          }
           renderDropboxErrorBox();
           if (!silent) showSnackbar('Pulled latest records from Dropbox!', 'success');
         }
+        return true;
       } catch (err) {
-        console.warn('Dropbox pull error:', err);
-        if (!uiState.dropboxError) {
-          uiState.dropboxError = formatDropboxApiError(0, err.message);
-          renderDropboxErrorBox();
-        }
-        if (!silent) showSnackbar('Could not pull file from Dropbox', 'error');
+        uiState.dropboxError = { code: 'NETWORK / AUTH', message: err.message || 'Could not reach Dropbox.' };
+        renderDropboxErrorBox();
+        if (!silent) showSnackbar('Dropbox pull failed', 'error');
+        return false;
       } finally {
         uiState.dropboxSyncing = false;
         updateDropboxStatusPill();
@@ -1529,29 +1191,132 @@
     }
 
     async function uploadCsvReportToDropbox(filename, csvContent) {
-      const token = await ensureValidDropboxAccessToken();
-      if (!token) return false;
-      const folder = resolveDropboxFolderBase();
-      const filePath = `${folder}/Reports/${filename}`;
-
       try {
-        const response = await fetchWithRetry('https://content.dropboxapi.com/2/files/upload', {
+        const token = await ensureValidDropboxAccessToken(false);
+        if (!token) return false;
+        const baseFolder = getNormalizedDropboxFilePath().replace(/\/[^/]+\.json$/i, '');
+        const reportPath = `${baseFolder}/Reports/${filename}`;
+        const res = await fetchWithRetry('https://content.dropboxapi.com/2/files/upload', {
           method: 'POST',
           headers: {
-            'Authorization': 'Bearer ' + token,
+            'Authorization': `Bearer ${token}`,
             'Dropbox-API-Arg': JSON.stringify({
-              path: filePath,
+              path: reportPath,
               mode: 'overwrite',
-              autorename: false,
-              mute: false
+              autorename: true,
+              mute: true
             }),
             'Content-Type': 'application/octet-stream'
           },
           body: csvContent
         });
-        return response.ok;
-      } catch (e) {
+        return res.ok;
+      } catch {
         return false;
+      }
+    }
+
+    // OAuth2 PKCE Helper for Permanent Refresh Token Generation
+    let oauthPkceVerifier = '';
+    async function startDropboxOAuthFlow() {
+      const appKey = document.getElementById('dbx-app-key-input')?.value.trim();
+      if (!appKey) {
+        showSnackbar('Enter your Dropbox App Key first', 'error');
+        return;
+      }
+      const array = new Uint8Array(32);
+      crypto.getRandomValues(array);
+      oauthPkceVerifier = btoa(String.fromCharCode(...array)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+      const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(oauthPkceVerifier));
+      const challenge = btoa(String.fromCharCode(...new Uint8Array(digest))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+      const authUrl = `https://www.dropbox.com/oauth2/authorize?client_id=${encodeURIComponent(appKey)}&response_type=code&code_challenge=${encodeURIComponent(challenge)}&code_challenge_method=S256&token_access_type=offline`;
+      document.getElementById('dbx-oauth-code-box')?.classList.remove('hidden');
+      window.open(authUrl, '_blank', 'width=600,height=700');
+    }
+
+    async function exchangeDropboxAuthCode() {
+      const appKey = document.getElementById('dbx-app-key-input')?.value.trim();
+      const appSecret = document.getElementById('dbx-app-secret-input')?.value.trim();
+      const code = document.getElementById('dbx-auth-code-input')?.value.trim();
+      if (!appKey || !code) {
+        showSnackbar('Enter App Key and Authorization Code', 'error');
+        return;
+      }
+      try {
+        const params = new URLSearchParams({
+          code,
+          grant_type: 'authorization_code',
+          client_id: appKey
+        });
+        if (oauthPkceVerifier) params.append('code_verifier', oauthPkceVerifier);
+        if (appSecret) params.append('client_secret', appSecret);
+
+        const res = await fetch('https://api.dropboxapi.com/oauth2/token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: params.toString()
+        });
+        const data = await res.json();
+        if (!res.ok || !data.refresh_token) {
+          throw new Error(data.error_description || 'Could not exchange authorization code');
+        }
+        document.getElementById('dbx-refresh-token-input').value = data.refresh_token;
+        appState.dropbox.refreshToken = data.refresh_token;
+        appState.dropbox.appKey = appKey;
+        appState.dropbox.appSecret = appSecret || '';
+        appState.dropbox.accessToken = data.access_token || '';
+        appState.dropbox.tokenExpiresAt = Date.now() + ((data.expires_in || 14400) * 1000);
+        document.getElementById('dbx-oauth-code-box')?.classList.add('hidden');
+        saveState(true);
+        renderDropboxErrorBox();
+        showSnackbar('Permanent Refresh Token connected!', 'success');
+      } catch (err) {
+        showSnackbar(err.message || 'OAuth exchange failed', 'error');
+      }
+    }
+
+    async function testDropboxConnection() {
+      appState.dropbox.refreshToken = document.getElementById('dbx-refresh-token-input')?.value.trim() || '';
+      appState.dropbox.appKey = document.getElementById('dbx-app-key-input')?.value.trim() || '';
+      appState.dropbox.appSecret = document.getElementById('dbx-app-secret-input')?.value.trim() || '';
+      appState.dropbox.accessToken = document.getElementById('dbx-token-input')?.value.trim() || '';
+      try {
+        const token = await ensureValidDropboxAccessToken(true);
+        if (!token) {
+          showSnackbar('Enter a Refresh Token or Access Token first', 'error');
+          return;
+        }
+        const res = await fetch('https://api.dropboxapi.com/2/users/get_current_account', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+        if (!res.ok) {
+          uiState.dropboxError = await parseDropboxHttpError(res);
+          renderDropboxErrorBox();
+          showSnackbar('Connection test failed', 'error');
+          return;
+        }
+        const acct = await res.json();
+        uiState.dropboxError = null;
+        renderDropboxErrorBox();
+        showSnackbar(`Connected: ${acct.name?.display_name || 'Dropbox Account'}`, 'success');
+      } catch (err) {
+        uiState.dropboxError = { code: 'CONNECTION_ERROR', message: err.message };
+        renderDropboxErrorBox();
+        showSnackbar('Connection test failed', 'error');
+      }
+    }
+
+    function toggleTokenVisibility() {
+      const inp = document.getElementById('dbx-token-input');
+      const btn = document.getElementById('dbx-toggle-vis-btn');
+      if (!inp) return;
+      const isHidden = inp.type === 'password';
+      inp.type = isHidden ? 'text' : 'password';
+      if (btn) {
+        btn.innerHTML = `<i data-lucide="${isHidden ? 'eye-off' : 'eye'}" class="w-3 h-3"></i><span>${isHidden ? 'Hide' : 'Show'}</span>`;
+        lucide.createIcons();
       }
     }
 
@@ -1560,12 +1325,10 @@
       document.getElementById('dbx-app-key-input').value = appState.dropbox.appKey || '';
       document.getElementById('dbx-app-secret-input').value = appState.dropbox.appSecret || '';
       document.getElementById('dbx-token-input').value = appState.dropbox.accessToken || '';
-      const pathVal = appState.dropbox.folderPath || '/MIV_Farm_Records/miv_farm_database.json';
-      document.getElementById('dbx-path-input').value = pathVal;
-      const targetBadge = document.getElementById('dbx-target-badge');
-      if (targetBadge) targetBadge.textContent = pathVal;
-      document.getElementById('dbx-autosync-input').checked = !!appState.dropbox.autoSync;
-      document.getElementById('dbx-last-sync').textContent = appState.dropbox.lastSync ? formatDisplayDateTime(appState.dropbox.lastSync) : 'Never';
+      document.getElementById('dbx-path-input').value = appState.dropbox.folderPath || '/MIV_Farm_Records/miv_farm_database.json';
+      document.getElementById('dbx-autosync-input').checked = appState.dropbox.autoSync !== false;
+      const badge = document.getElementById('dbx-target-badge');
+      if (badge) badge.textContent = getNormalizedDropboxFilePath();
       renderDropboxErrorBox();
       document.getElementById('dropbox-modal').classList.remove('hidden');
       lucide.createIcons();
@@ -1575,128 +1338,92 @@
       document.getElementById('dropbox-modal').classList.add('hidden');
     }
 
-    function saveDropboxConfig() {
-      const refreshToken = document.getElementById('dbx-refresh-token-input').value.trim();
-      const appKey = document.getElementById('dbx-app-key-input').value.trim();
-      const appSecret = document.getElementById('dbx-app-secret-input').value.trim();
-      const token = document.getElementById('dbx-token-input').value.trim();
-      const path = document.getElementById('dbx-path-input').value.trim() || '/MIV_Farm_Records/miv_farm_database.json';
-      const autoSync = document.getElementById('dbx-autosync-input').checked;
-
-      appState.dropbox.refreshToken = refreshToken;
-      appState.dropbox.appKey = appKey;
-      appState.dropbox.appSecret = appSecret;
-      appState.dropbox.accessToken = token;
-      if (refreshToken && !token) {
+    async function saveDropboxConfig() {
+      appState.dropbox.refreshToken = document.getElementById('dbx-refresh-token-input').value.trim();
+      appState.dropbox.appKey = document.getElementById('dbx-app-key-input').value.trim();
+      appState.dropbox.appSecret = document.getElementById('dbx-app-secret-input').value.trim();
+      appState.dropbox.accessToken = document.getElementById('dbx-token-input').value.trim();
+      appState.dropbox.folderPath = document.getElementById('dbx-path-input').value.trim() || '/MIV_Farm_Records/miv_farm_database.json';
+      appState.dropbox.autoSync = document.getElementById('dbx-autosync-input').checked;
+      if (appState.dropbox.refreshToken) {
         appState.dropbox.tokenExpiresAt = 0;
       }
-      appState.dropbox.folderPath = path;
-      appState.dropbox.autoSync = autoSync;
-      uiState.dropboxError = null;
       saveState(false);
-
-      if (token || refreshToken) {
-        pullFromDropbox(false).then(() => syncToDropbox(false));
-      } else {
-        showSnackbar('Dropbox settings saved (Local Mode)', 'success');
-      }
-      closeDropboxModal();
+      await pullFromDropbox(true);
+      await syncToDropbox(false);
     }
 
     function copyAutoLoginUrl() {
-      const refreshToken = document.getElementById('dbx-refresh-token-input').value.trim() || appState.dropbox.refreshToken;
-      const appKey = document.getElementById('dbx-app-key-input').value.trim() || appState.dropbox.appKey;
-      const appSecret = document.getElementById('dbx-app-secret-input').value.trim() || appState.dropbox.appSecret;
-      const token = document.getElementById('dbx-token-input').value.trim() || appState.dropbox.accessToken;
-      const path = document.getElementById('dbx-path-input').value.trim() || appState.dropbox.folderPath || '/MIV_Farm_Records/miv_farm_database.json';
-
-      if (!token && !refreshToken) {
-        showSnackbar('Paste a Refresh Token or Access Token first', 'error');
+      const payload = {
+        folderPath: getNormalizedDropboxFilePath()
+      };
+      if (appState.dropbox.refreshToken && appState.dropbox.appKey) {
+        payload.refreshToken = appState.dropbox.refreshToken;
+        payload.appKey = appState.dropbox.appKey;
+        if (appState.dropbox.appSecret) payload.appSecret = appState.dropbox.appSecret;
+      } else if (appState.dropbox.accessToken) {
+        payload.accessToken = appState.dropbox.accessToken;
+      } else {
+        showSnackbar('Save your Dropbox token first before copying link', 'error');
         return;
       }
-      if (refreshToken && !appKey) {
-        showSnackbar('Enter App Key alongside Refresh Token so new devices auto-renew', 'error');
-        return;
-      }
-      appState.dropbox.refreshToken = refreshToken;
-      appState.dropbox.appKey = appKey;
-      appState.dropbox.appSecret = appSecret;
-      appState.dropbox.accessToken = token;
-      appState.dropbox.folderPath = path;
-      saveState(false);
-
+      const encoded = btoa(unescape(encodeURIComponent(JSON.stringify(payload))));
       const baseUrl = window.location.href.split('#')[0];
-      const fullUrl = `${baseUrl}#miv=${buildSyncPayloadBase64(appState.dropbox)}`;
-      const tempInput = document.createElement('input');
-      tempInput.value = fullUrl;
-      document.body.appendChild(tempInput);
-      tempInput.select();
-      document.execCommand('copy');
-      document.body.removeChild(tempInput);
+      const syncUrl = `${baseUrl}#miv=${encoded}`;
 
-      showSnackbar('1-Tap Sync URL copied! Open on any device to auto-hydrate.', 'success');
+      const temp = document.createElement('textarea');
+      temp.value = syncUrl;
+      document.body.appendChild(temp);
+      temp.select();
+      document.execCommand('copy');
+      document.body.removeChild(temp);
+      showSnackbar('1-Tap New Device Sync Link copied!', 'success');
     }
 
     function exportJsonBackup() {
-      const dataStr = JSON.stringify(appState, null, 2);
-      const blob = new Blob([dataStr], { type: 'application/json' });
+      const blob = new Blob([JSON.stringify(appState, null, 2)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
       a.download = `MIV_Farm_Backup_${new Date().toISOString().slice(0, 10)}.json`;
       a.click();
       URL.revokeObjectURL(url);
-      showSnackbar('JSON backup downloaded', 'success');
+      showSnackbar('Local JSON backup downloaded', 'success');
     }
 
     // =========================================================================
-    // 4. REAL-TIME WORKER SUBMISSION NOTIFICATIONS
+    // 4. NOTIFICATIONS & HEADS-UP ALERTS
     // =========================================================================
-    let headsUpTimer = null;
+    let headsUpTimeout = null;
+    function triggerHeadsUpNotification(rec) {
+      const grp = appState.groups.find(g => g.id === rec.groupId)?.name || 'Farm';
+      const house = appState.houses.find(h => h.id === rec.houseId)?.name || '';
+      const ft = appState.feedTypes.find(f => f.id === rec.feedTypeId)?.code || 'Feed';
+      const msg = rec.entryType === 'input'
+        ? `${grp} Delivery: +${rec.bags} bags (${ft})`
+        : `${grp} ${house}: -${rec.bags} bags (${ft}) to Hopper`;
 
-    function triggerHeadsUpNotification(record) {
-      const grp = appState.groups.find(g => g.id === record.groupId);
-      const house = appState.houses.find(h => h.id === record.houseId);
-      const ft = appState.feedTypes.find(f => f.id === record.feedTypeId);
-      const worker = appState.workers.find(w => w.id === record.workerId);
-      const actionLabel = record.entryType === 'input'
-        ? (record.siloTon ? `Silo Delivery (+${record.siloTon}T / ${record.bags} bags)` : `Delivery (+${record.bags} bags)`)
-        : (record.siloTon ? `Hopper Input (-${record.bags} bags • Silo ${record.siloTon}T)` : `Hopper Input (-${record.bags} bags)`);
-
-      const locationText = record.entryType === 'input'
-        ? `${grp?.name || 'Group'}`
-        : `${grp?.name || 'Group'} • ${house?.name || 'House'}`;
-      const message = `${worker?.name || 'Worker'} logged ${actionLabel} of ${ft?.code || 'Feed'} at ${locationText}`;
-
-      const notifObj = {
-        id: 'n-' + Date.now(),
-        text: message,
+      appState.notifications.unshift({
+        id: 'notif-' + Date.now() + Math.random().toString(36).slice(2, 5),
+        text: msg,
         time: new Date().toISOString(),
         read: false
-      };
-
-      appState.notifications.unshift(notifObj);
-      if (appState.notifications.length > 50) appState.notifications.pop();
+      });
+      if (appState.notifications.length > 40) appState.notifications.length = 40;
+      updateNotificationBadge();
 
       const banner = document.getElementById('heads-up-banner');
-      const textEl = document.getElementById('heads-up-text');
-      const timeEl = document.getElementById('heads-up-time');
-      if (banner && textEl) {
-        textEl.textContent = message;
-        timeEl.textContent = 'Just now';
+      const txt = document.getElementById('heads-up-text');
+      if (banner && txt) {
+        txt.textContent = msg;
         banner.classList.remove('hidden');
-        lucide.createIcons();
-        clearTimeout(headsUpTimer);
-        headsUpTimer = setTimeout(() => {
-          banner.classList.add('hidden');
-        }, 4500);
+        clearTimeout(headsUpTimeout);
+        headsUpTimeout = setTimeout(() => banner.classList.add('hidden'), 4000);
       }
-
-      updateNotificationBadge();
     }
 
     function dismissHeadsUpNotification() {
-      document.getElementById('heads-up-banner').classList.add('hidden');
+      document.getElementById('heads-up-banner')?.classList.add('hidden');
     }
 
     function updateNotificationBadge() {
@@ -1704,7 +1431,7 @@
       if (!badge) return;
       const unread = appState.notifications.filter(n => !n.read).length;
       if (unread > 0) {
-        badge.textContent = unread > 9 ? '9+' : unread;
+        badge.textContent = unread > 9 ? '9+' : String(unread);
         badge.classList.remove('hidden');
       } else {
         badge.classList.add('hidden');
@@ -1713,65 +1440,102 @@
 
     function openNotificationCenter() {
       const list = document.getElementById('notif-list');
-      if (appState.notifications.length === 0) {
-        list.innerHTML = `<div class="py-10 text-center text-xs text-earth-500">No feed alerts yet.</div>`;
-      } else {
-        list.innerHTML = appState.notifications.map(n => `
-          <div class="py-3 flex items-start gap-3 ${n.read ? 'opacity-70' : ''}">
-            <div class="w-2 h-2 rounded-full mt-1.5 shrink-0 ${n.read ? 'bg-earth-300' : 'bg-harvest-500'}"></div>
-            <div class="flex-1">
-              <p class="text-xs font-medium text-earth-900 leading-snug">${escapeHtml(n.text)}</p>
-              <span class="text-[10px] text-earth-400 mt-0.5 block">${formatDisplayDateTime(n.time)}</span>
-            </div>
-          </div>
-        `).join('');
+      if (list) {
+        list.innerHTML = appState.notifications.length === 0
+          ? `<p class="text-xs text-earth-500 text-center py-8">No recent alerts</p>`
+          : appState.notifications.map(n => `
+              <div class="py-3 flex items-start justify-between gap-2 ${n.read ? 'opacity-65' : ''}">
+                <p class="text-xs font-semibold text-earth-900">${escapeHtml(n.text)}</p>
+                <span class="text-[10px] text-earth-400 shrink-0">${formatDisplayDateTime(n.time)}</span>
+              </div>
+            `).join('');
       }
-      document.getElementById('notif-modal').classList.remove('hidden');
+      document.getElementById('notif-modal')?.classList.remove('hidden');
     }
 
     function closeNotificationCenter() {
-      document.getElementById('notif-modal').classList.add('hidden');
+      document.getElementById('notif-modal')?.classList.add('hidden');
     }
 
     function markAllNotificationsRead() {
-      appState.notifications.forEach(n => n.read = true);
+      appState.notifications.forEach(n => { n.read = true; });
       saveState(false);
       openNotificationCenter();
     }
 
     // =========================================================================
-    // 5. ROLE SWITCHING & NAVIGATION
+    // 5. ROLE SWITCHING, PIN SECURITY & BOTTOM NAVIGATION
     // =========================================================================
-    function switchRole(role) {
-      if (role === 'admin') {
+    function requestPasswordVerification({ title, desc, expectedPassword, sessionFlagKey }, onSuccess) {
+      if (sessionFlagKey && uiState[sessionFlagKey]) {
+        onSuccess();
+        return;
+      }
+      document.getElementById('pin-modal-title').textContent = title || 'Password Required';
+      document.getElementById('pin-modal-desc').textContent = desc || 'Enter password to continue';
+      const input = document.getElementById('pin-modal-input');
+      const err = document.getElementById('pin-modal-error');
+      input.value = '';
+      err.classList.add('hidden');
+      uiState.pendingPinCallback = (entered) => {
+        if (entered === expectedPassword) {
+          if (sessionFlagKey) uiState[sessionFlagKey] = true;
+          closePinModal();
+          onSuccess();
+        } else {
+          err.classList.remove('hidden');
+        }
+      };
+      document.getElementById('pin-modal').classList.remove('hidden');
+      setTimeout(() => input.focus(), 50);
+    }
+
+    function submitPinVerification(e) {
+      e.preventDefault();
+      const val = document.getElementById('pin-modal-input').value.trim();
+      if (typeof uiState.pendingPinCallback === 'function') {
+        uiState.pendingPinCallback(val);
+      }
+    }
+
+    function closePinModal() {
+      document.getElementById('pin-modal').classList.add('hidden');
+      uiState.pendingPinCallback = null;
+    }
+
+    function switchRole(newRole) {
+      if (newRole === uiState.role) return;
+      if (newRole === 'admin') {
         requestPasswordVerification({
-          title: 'Farm Manager (Admin)',
-          desc: 'Enter Farm Manager password to access Admin Controls',
+          title: 'Farm Manager Access',
+          desc: 'Enter Admin password to open Manager controls',
           expectedPassword: appState.security?.adminPassword || '1234',
           sessionFlagKey: 'adminUnlocked'
         }, () => {
-          applyRoleSwitch('admin');
+          uiState.role = 'admin';
+          uiState.activeTab = 'admin-dashboard';
+          updateRoleToggleButtons();
+          renderApp();
         });
-        return;
+      } else {
+        uiState.role = 'worker';
+        uiState.activeTab = 'worker-input';
+        updateRoleToggleButtons();
+        renderApp();
       }
-      applyRoleSwitch(role);
     }
 
-    function applyRoleSwitch(role) {
-      uiState.role = role;
-      const btnWorker = document.getElementById('role-btn-worker');
-      const btnAdmin = document.getElementById('role-btn-admin');
-
-      if (role === 'worker') {
-        btnWorker.className = 'py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all bg-white text-farm-900 shadow-sm';
-        btnAdmin.className = 'py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all text-farm-200 hover:text-white';
-        uiState.activeTab = 'worker-input';
+    function updateRoleToggleButtons() {
+      const wBtn = document.getElementById('role-btn-worker');
+      const aBtn = document.getElementById('role-btn-admin');
+      if (!wBtn || !aBtn) return;
+      if (uiState.role === 'worker') {
+        wBtn.className = 'py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all bg-white text-farm-900 shadow-sm';
+        aBtn.className = 'py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all text-farm-200 hover:text-white';
       } else {
-        btnAdmin.className = 'py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all bg-harvest-500 text-farm-950 shadow-sm';
-        btnWorker.className = 'py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all text-farm-200 hover:text-white';
-        uiState.activeTab = 'admin-dashboard';
+        aBtn.className = 'py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all bg-white text-farm-900 shadow-sm';
+        wBtn.className = 'py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all text-farm-200 hover:text-white';
       }
-      renderApp();
     }
 
     function switchTab(tabId) {
@@ -1781,11 +1545,13 @@
 
     function renderBottomNav() {
       const nav = document.getElementById('bottom-nav');
+      if (!nav) return;
       const tabs = uiState.role === 'worker'
         ? [
             { id: 'worker-input', label: 'Daily Input', icon: 'clipboard-edit' },
             { id: 'worker-history', label: 'My Logs', icon: 'history' },
-            { id: 'worker-summary', label: 'Cycle Summary', icon: 'pie-chart' }
+            { id: 'worker-summary', label: 'Cycle Summary', icon: 'pie-chart' },
+            { id: 'worker-reports', label: 'Reports', icon: 'file-spreadsheet' }
           ]
         : [
             { id: 'admin-dashboard', label: 'Dashboard', icon: 'layout-dashboard' },
@@ -1794,13 +1560,13 @@
           ];
 
       nav.innerHTML = `
-        <div class="grid grid-cols-3 gap-1">
+        <div class="grid ${tabs.length === 4 ? 'grid-cols-4' : 'grid-cols-3'} gap-1">
           ${tabs.map(t => {
             const active = uiState.activeTab === t.id;
             return `
-              <button onclick="switchTab('${t.id}')" class="flex flex-col items-center justify-center py-1.5 px-2 rounded-2xl transition ${active ? 'text-farm-900 bg-farm-50 font-bold' : 'text-earth-500 hover:text-earth-800 font-medium'}">
+              <button onclick="switchTab('${t.id}')" class="flex flex-col items-center justify-center py-1.5 px-1.5 rounded-2xl transition ${active ? 'text-farm-900 bg-farm-50 font-bold' : 'text-earth-500 hover:text-earth-800 font-medium'}">
                 <i data-lucide="${t.icon}" class="w-5 h-5 mb-0.5 ${active ? 'text-farm-800 stroke-[2.4]' : ''}"></i>
-                <span class="text-[11px] tracking-tight">${t.label}</span>
+                <span class="text-[11px] tracking-tight truncate max-w-full">${t.label}</span>
               </button>
             `;
           }).join('')}
@@ -1811,24 +1577,39 @@
     // =========================================================================
     // 6. MAIN VIEW ROUTER
     // =========================================================================
-    function renderApp() {
+    function captureLiveFormDrafts() {
+      const doEl = document.getElementById('input-do-number');
+      if (doEl) uiState.draftDoNumber = doEl.value;
+      const lorryEl = document.getElementById('input-lorry-number');
+      if (lorryEl) uiState.draftLorryNumber = lorryEl.value;
+      const dtEl = document.getElementById('input-datetime');
+      if (dtEl) uiState.draftDatetime = dtEl.value;
+      const searchEl = document.getElementById('report-search-input');
+      if (searchEl) uiState.reportSearch = searchEl.value;
+    }
+
+    function renderApp(preserveScroll = false) {
+      captureLiveFormDrafts();
       const cycleInfo = getCycleDayInfo();
       document.getElementById('header-subtitle').textContent = `${appState.groups.length} Groups • ${appState.cycle.name} (Day ${cycleInfo.dayNum}/${cycleInfo.totalDays})`;
 
       renderBottomNav();
       const viewport = document.getElementById('main-viewport');
-      viewport.scrollTop = 0;
+      const prevScrollTop = viewport.scrollTop;
+      if (!preserveScroll) viewport.scrollTop = 0;
 
       if (uiState.role === 'worker') {
         if (uiState.activeTab === 'worker-input') viewport.innerHTML = renderWorkerInputView();
         else if (uiState.activeTab === 'worker-history') viewport.innerHTML = renderHistoryView(false);
         else if (uiState.activeTab === 'worker-summary') viewport.innerHTML = renderWorkerSummaryView();
+        else if (uiState.activeTab === 'worker-reports') viewport.innerHTML = renderAdminReportsView();
       } else {
         if (uiState.activeTab === 'admin-dashboard') viewport.innerHTML = renderAdminDashboardView();
         else if (uiState.activeTab === 'admin-reports') viewport.innerHTML = renderAdminReportsView();
         else if (uiState.activeTab === 'admin-setup') viewport.innerHTML = renderAdminSetupView();
       }
 
+      if (preserveScroll) viewport.scrollTop = prevScrollTop;
       lucide.createIcons();
     }
 
@@ -2067,11 +1848,11 @@
                   <div class="grid grid-cols-2 gap-2.5">
                     <div>
                       <label class="block text-[11px] font-semibold text-blue-900 mb-1">DO Number</label>
-                      <input id="input-do-number" type="text" placeholder="e.g. DO-8842" class="w-full px-3 py-2 rounded-xl bg-white border border-blue-200 text-xs font-semibold text-earth-900 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                      <input id="input-do-number" type="text" value="${escapeHtml(uiState.draftDoNumber || '')}" oninput="uiState.draftDoNumber = this.value" placeholder="e.g. DO-8842" class="w-full px-3 py-2 rounded-xl bg-white border border-blue-200 text-xs font-semibold text-earth-900 focus:outline-none focus:ring-2 focus:ring-blue-500" />
                     </div>
                     <div>
                       <label class="block text-[11px] font-semibold text-blue-900 mb-1">Lorry Number</label>
-                      <input id="input-lorry-number" type="text" placeholder="e.g. VKA 8821" class="w-full px-3 py-2 rounded-xl bg-white border border-blue-200 text-xs font-semibold text-earth-900 uppercase focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                      <input id="input-lorry-number" type="text" value="${escapeHtml(uiState.draftLorryNumber || '')}" oninput="uiState.draftLorryNumber = this.value.toUpperCase()" placeholder="e.g. VKA 8821" class="w-full px-3 py-2 rounded-xl bg-white border border-blue-200 text-xs font-semibold text-earth-900 uppercase focus:outline-none focus:ring-2 focus:ring-blue-500" />
                     </div>
                   </div>
                 </div>
@@ -2080,7 +1861,7 @@
               <!-- 7. Date & Time -->
               <div>
                 <label class="block text-xs font-extrabold text-earth-900 mb-1.5">7. Date &amp; Time *</label>
-                <input id="input-datetime" type="datetime-local" value="${getCurrentLocalDateTimeInput()}" required class="w-full px-3.5 py-2.5 rounded-2xl bg-earth-50 border border-earth-200 text-xs font-semibold text-earth-900 focus:outline-none focus:ring-2 focus:ring-farm-700" />
+                <input id="input-datetime" type="datetime-local" value="${escapeHtml(uiState.draftDatetime || getCurrentLocalDateTimeInput())}" oninput="uiState.draftDatetime = this.value" required class="w-full px-3.5 py-2.5 rounded-2xl bg-earth-50 border border-earth-200 text-xs font-semibold text-earth-900 focus:outline-none focus:ring-2 focus:ring-farm-700" />
               </div>
 
               <!-- Submit CTA Button -->
@@ -2580,6 +2361,9 @@
       saveState(true);
 
       uiState.hopperSiloTons = 0;
+      uiState.draftDoNumber = '';
+      uiState.draftLorryNumber = '';
+      uiState.draftDatetime = '';
 
       const selectedHouseObj = appState.houses.find(h => h.id === uiState.selectedHouseId);
       const labelMsg = isSiloDelivery
@@ -2850,7 +2634,7 @@
             <!-- Search DO / Lorry / Worker / House -->
             <div class="relative">
               <i data-lucide="search" class="w-4 h-4 text-earth-400 absolute left-3.5 top-3"></i>
-              <input type="text" value="${escapeHtml(uiState.reportSearch)}" oninput="uiState.reportSearch=this.value; renderApp()" placeholder="Search DO No., Lorry No., Worker, House..." class="w-full pl-9 pr-3.5 py-2.5 rounded-xl bg-earth-50 border border-earth-200 text-xs font-medium text-earth-900 focus:outline-none focus:ring-2 focus:ring-farm-700" />
+              <input id="report-search-input" type="text" value="${escapeHtml(uiState.reportSearch)}" oninput="uiState.reportSearch=this.value; renderApp(true)" placeholder="Search DO No., Lorry No., Worker, House..." class="w-full pl-9 pr-3.5 py-2.5 rounded-xl bg-earth-50 border border-earth-200 text-xs font-medium text-earth-900 focus:outline-none focus:ring-2 focus:ring-farm-700" />
             </div>
 
             <!-- Totals Summary for Filtered View -->
