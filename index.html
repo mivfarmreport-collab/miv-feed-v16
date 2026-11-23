@@ -96,6 +96,9 @@
       -ms-overflow-style: none;
       scrollbar-width: none;
     }
+    #main-viewport {
+      overflow-anchor: none;
+    }
     /* Phone Container Frame on Desktop */
     @media (min-width: 640px) {
       .mobile-shell {
@@ -1686,6 +1689,7 @@
       renderBottomNav();
       const viewport = document.getElementById('main-viewport');
       const prevScrollTop = viewport.scrollTop;
+      const prevWinScrollY = window.scrollY;
       if (!preserveScroll) viewport.scrollTop = 0;
 
       if (uiState.role === 'worker') {
@@ -1699,8 +1703,14 @@
         else if (uiState.activeTab === 'admin-setup') viewport.innerHTML = renderAdminSetupView();
       }
 
-      if (preserveScroll) viewport.scrollTop = prevScrollTop;
       lucide.createIcons();
+      if (preserveScroll) {
+        viewport.scrollTop = prevScrollTop;
+        requestAnimationFrame(() => {
+          viewport.scrollTop = prevScrollTop;
+          if (window.scrollY !== prevWinScrollY) window.scrollTo(0, prevWinScrollY);
+        });
+      }
     }
 
     // =========================================================================
@@ -2038,13 +2048,13 @@
         <div class="space-y-4 fade-in">
           <!-- Group Filter Pills Bar -->
           <div class="flex items-center gap-2 overflow-x-auto no-scrollbar bg-white p-2 rounded-2xl shadow-soft border border-earth-200/70">
-            <button onclick="uiState.summaryGroupFilter='all'; renderApp()" class="px-3.5 py-2 rounded-full text-xs font-extrabold whitespace-nowrap transition ${isAll ? 'bg-farm-900 text-white shadow-2xs' : 'bg-earth-50 text-earth-700 hover:bg-earth-100'}">
+            <button onclick="uiState.summaryGroupFilter='all'; renderApp(true)" class="px-3.5 py-2 rounded-full text-xs font-extrabold whitespace-nowrap transition ${isAll ? 'bg-farm-900 text-white shadow-2xs' : 'bg-earth-50 text-earth-700 hover:bg-earth-100'}">
               All ${activeUserGroups.length} Groups
             </button>
             ${activeUserGroups.map(g => {
               const active = !isAll && activeGroup && activeGroup.id === g.id;
               return `
-                <button onclick="uiState.summaryGroupFilter='${g.id}'; renderApp()" class="px-3.5 py-2 rounded-full text-xs font-extrabold whitespace-nowrap transition ${active ? 'bg-farm-900 text-white shadow-2xs' : 'bg-earth-50 text-earth-700 hover:bg-earth-100'}">
+                <button onclick="uiState.summaryGroupFilter='${g.id}'; renderApp(true)" class="px-3.5 py-2 rounded-full text-xs font-extrabold whitespace-nowrap transition ${active ? 'bg-farm-900 text-white shadow-2xs' : 'bg-earth-50 text-earth-700 hover:bg-earth-100'}">
                   ${escapeHtml(g.name)}
                 </button>
               `;
@@ -2259,7 +2269,7 @@
       if (type === 'output' && Number(uiState.bagCount) <= 0 && !(Number(uiState.hopperSiloTons) > 0)) {
         uiState.bagCount = 15;
       }
-      renderApp();
+      renderApp(true);
     }
 
     function setDeliveryUnitMode(mode) {
@@ -2271,7 +2281,7 @@
           uiState.selectedHouseId = nonStore[0].id;
         }
       }
-      renderApp();
+      renderApp(true);
     }
 
     function adjustSiloTon(delta) {
@@ -2349,7 +2359,7 @@
         const houseWorkers = appState.workers.filter(w => w.houseId === uiState.selectedHouseId);
         if (houseWorkers.length > 0) uiState.selectedWorkerId = houseWorkers[0].id;
       }
-      renderApp();
+      renderApp(true);
     }
 
     function selectWorkerHouse(houseId) {
@@ -2358,12 +2368,12 @@
       if (houseWorkers.length > 0) {
         uiState.selectedWorkerId = houseWorkers[0].id;
       }
-      renderApp();
+      renderApp(true);
     }
 
     function selectWorkerFeedType(ftId) {
       uiState.selectedFeedTypeId = ftId;
-      renderApp();
+      renderApp(true);
     }
 
     function adjustBagCount(delta) {
@@ -3019,36 +3029,60 @@
         </table>
       `).join('');
 
-      const printWin = window.open('', '_blank', 'width=900,height=700');
-      if (!printWin) {
-        showSnackbar('Pop-up blocked — allow pop-ups to Print / PDF', 'error');
-        return;
-      }
-
-      printWin.document.write(`
+      const reportHtml = `
         <!DOCTYPE html>
         <html>
         <head>
+          <meta charset="UTF-8" />
           <title>MIV Farm Feed Report - ${escapeHtml(grpName)}</title>
           <style>
-            body { font-family: Arial, sans-serif; color: #181C19; padding: 24px; }
+            body { font-family: Arial, sans-serif; color: #181C19; padding: 20px; margin: 0; }
+            @page { margin: 12mm; }
             @media print { body { padding: 0; } }
           </style>
         </head>
         <body>
-          <div style="display:flex;justify-content:space-between;align-items:flex-end;border-bottom:2px solid #1C3F2B;padding-bottom:10px;">
+          <div style="display:flex;justify-content:space-between;align-items:flex-end;border-bottom:2px solid #1C3F2B;padding-bottom:10px;gap:12px;">
             <div>
               <h2 style="margin:0;color:#1C3F2B;font-size:18px;">MIV Farm Daily Feeds Record</h2>
               <p style="margin:4px 0 0;font-size:12px;color:#555D4F;">Group: <strong>${escapeHtml(grpName)}</strong> &bull; Cycle: <strong>${uiState.reportCycleFilter === 'all' ? 'All Cycles' : 'Cycle ' + escapeHtml(uiState.reportCycleFilter)}</strong> &bull; House: <strong>${escapeHtml(houseName)}</strong> &bull; Date: <strong>${escapeHtml(uiState.reportDateFrom)} to ${escapeHtml(uiState.reportDateTo)}</strong></p>
             </div>
-            <div style="font-size:11px;color:#555D4F;">Printed: ${new Date().toLocaleString()}</div>
+            <div style="font-size:11px;color:#555D4F;text-align:right;">Printed: ${new Date().toLocaleString()}</div>
           </div>
           ${tablesHtml}
-          <script>window.onload = function() { window.print(); };<\/script>
         </body>
         </html>
-      `);
-      printWin.document.close();
+      `;
+
+      // Use a hidden in-page iframe so Print / Save as PDF works natively on mobile & webviews without popup blocking
+      const existingFrame = document.getElementById('miv-print-frame');
+      if (existingFrame) existingFrame.remove();
+
+      const iframe = document.createElement('iframe');
+      iframe.id = 'miv-print-frame';
+      iframe.style.position = 'fixed';
+      iframe.style.right = '0';
+      iframe.style.bottom = '0';
+      iframe.style.width = '0';
+      iframe.style.height = '0';
+      iframe.style.border = '0';
+      iframe.style.opacity = '0';
+      iframe.style.pointerEvents = 'none';
+      document.body.appendChild(iframe);
+
+      const frameDoc = iframe.contentDocument || iframe.contentWindow.document;
+      frameDoc.open();
+      frameDoc.write(reportHtml);
+      frameDoc.close();
+
+      setTimeout(() => {
+        try {
+          iframe.contentWindow.focus();
+          iframe.contentWindow.print();
+        } catch (err) {
+          window.print();
+        }
+      }, 250);
     }
 
     function renderAdminSetupView() {
